@@ -57,6 +57,12 @@ teams-migrator migrate --profile default --apply
 
 The CLI is interactive by default when run in a terminal. If required inputs or secrets are missing, it prompts for them.
 
+To update an installed binary to the latest published release:
+
+```bash
+teams-migrator self-update
+```
+
 Config defaults:
 - config path: `os.UserConfigDir()/teams-migrator/config.yaml`
 - override path with `--config` or `TEAMS_MIGRATOR_CONFIG_PATH`

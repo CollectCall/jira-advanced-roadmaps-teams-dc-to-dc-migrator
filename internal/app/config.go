@@ -103,24 +103,6 @@ func parseConfig(args []string) (Config, error) {
 		return Config{}, err
 	}
 
-	store, err := loadProfileStore(cfg.ConfigPath)
-	if err != nil {
-		return Config{}, fmt.Errorf("loading config store: %w", err)
-	}
-	applySavedProfile(&cfg, resolveProfile(cfg, store))
-	cfg.SecretStorePath = defaultSecretStorePath(cfg.ConfigPath)
-
-	selectedProfile := cfg.Profile
-	if selectedProfile == "" {
-		if store.CurrentProfile != "" {
-			selectedProfile = store.CurrentProfile
-		} else {
-			selectedProfile = "default"
-		}
-	}
-	cfg.Profile = selectedProfile
-	cfg.HasSavedSecrets = secretStoreHasProfile(cfg.SecretStorePath, cfg.Profile)
-
 	if strings.TrimSpace(reportFormat) != "" {
 		cfg.ReportFormat = ReportFormat(strings.ToLower(reportFormat))
 	}
@@ -134,7 +116,27 @@ func parseConfig(args []string) (Config, error) {
 		cfg.DryRun = false
 	}
 
-	if cfg.Command != "config init" && cfg.Command != "config show" && cfg.Command != "config path" && !cfg.NoInput {
+	if cfg.Command != "version" && cfg.Command != "self-update" {
+		store, err := loadProfileStore(cfg.ConfigPath)
+		if err != nil {
+			return Config{}, fmt.Errorf("loading config store: %w", err)
+		}
+		applySavedProfile(&cfg, resolveProfile(cfg, store))
+		cfg.SecretStorePath = defaultSecretStorePath(cfg.ConfigPath)
+
+		selectedProfile := cfg.Profile
+		if selectedProfile == "" {
+			if store.CurrentProfile != "" {
+				selectedProfile = store.CurrentProfile
+			} else {
+				selectedProfile = "default"
+			}
+		}
+		cfg.Profile = selectedProfile
+		cfg.HasSavedSecrets = secretStoreHasProfile(cfg.SecretStorePath, cfg.Profile)
+	}
+
+	if cfg.Command != "config init" && cfg.Command != "config show" && cfg.Command != "config path" && cfg.Command != "version" && cfg.Command != "self-update" && !cfg.NoInput {
 		if err := loadSecretsIntoConfig(&cfg); err != nil {
 			return Config{}, err
 		}
@@ -174,7 +176,7 @@ func (c Config) validate() error {
 	}
 
 	switch c.Command {
-	case "validate", "plan", "migrate", "report", "config init", "config show", "config path":
+	case "validate", "plan", "migrate", "report", "config init", "config show", "config path", "version", "self-update":
 	default:
 		return fmt.Errorf("unknown command %q", c.Command)
 	}

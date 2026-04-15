@@ -576,7 +576,7 @@ func exitCodeFor(report Report) int {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: teams-migrator <validate|plan|migrate|report> [flags]")
+	fmt.Fprintln(w, "Usage: teams-migrator <validate|plan|migrate|report|version|self-update> [flags]")
 	fmt.Fprintln(w, "       teams-migrator config <init|show|path> [flags]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Flags:")

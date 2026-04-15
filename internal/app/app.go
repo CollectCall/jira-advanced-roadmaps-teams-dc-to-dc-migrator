@@ -22,6 +22,15 @@ func Run(args []string) int {
 
 	var report Report
 	switch cfg.Command {
+	case "version":
+		fmt.Fprintln(os.Stdout, currentVersion())
+		return ExitSuccess
+	case "self-update":
+		if err := runSelfUpdate(); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return ExitFailure
+		}
+		return ExitSuccess
 	case "validate":
 		report = runValidate(cfg)
 	case "plan":
