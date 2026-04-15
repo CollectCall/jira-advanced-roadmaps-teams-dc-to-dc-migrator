@@ -20,6 +20,13 @@ func Run(args []string) int {
 		return ExitFailure
 	}
 
+	if updated, err := maybeOfferSelfUpdate(cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return ExitFailure
+	} else if updated {
+		return ExitSuccess
+	}
+
 	var report Report
 	switch cfg.Command {
 	case "version":

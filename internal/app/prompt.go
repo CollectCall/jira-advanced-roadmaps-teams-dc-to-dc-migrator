@@ -783,6 +783,28 @@ func confirmApplyAfterPreview() (bool, error) {
 	return strings.TrimSpace(value) == "APPLY", nil
 }
 
+func promptForSelfUpdate(latest string) (bool, error) {
+	if !isInteractiveTerminal() {
+		return false, nil
+	}
+	reader := bufio.NewReader(os.Stdin)
+	renderWizardSection("Teams Migrator | Update", "New version available", []string{
+		fmt.Sprintf("Current version: %s", currentVersion()),
+		fmt.Sprintf("Latest release: %s", latest),
+		"Updating now will replace the installed binary and stop this run.",
+	}, "Type yes to update now, or press Enter to continue without updating.", "", "", "Default: no. Ctrl+C cancels.")
+	value, err := readLine(reader, "no")
+	if err != nil {
+		return false, err
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
 func readSecretLine() (string, error) {
 	fd := int(os.Stdin.Fd())
 	value, err := term.ReadPassword(fd)

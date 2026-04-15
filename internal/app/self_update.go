@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	releaseRepo    = "CollectCall/jira-plans-teams-dc-to-dc-migrator"
-	releaseBaseURL = "https://github.com/" + releaseRepo + "/releases/download"
+	releaseRepo         = "CollectCall/jira-plans-teams-dc-to-dc-migrator"
+	releaseBaseURL      = "https://github.com/" + releaseRepo + "/releases/download"
+	envSkipUpdatePrompt = "TEAMS_MIGRATOR_SKIP_UPDATE_CHECK"
 )
 
 type githubRelease struct {
@@ -33,6 +34,38 @@ func runSelfUpdate() error {
 	if err != nil {
 		return err
 	}
+	return applyReleaseUpdate(release)
+}
+
+func maybeOfferSelfUpdate(cfg Config) (bool, error) {
+	if cfg.NoInput || !isInteractiveTerminal() || currentVersion() == "" || currentVersion() == "dev" {
+		return false, nil
+	}
+	if cfg.Command == "version" || cfg.Command == "self-update" || boolEnv(envSkipUpdatePrompt, false) {
+		return false, nil
+	}
+
+	release, err := fetchLatestRelease()
+	if err != nil || release.TagName == "" || release.TagName == currentVersion() {
+		return false, nil
+	}
+
+	ok, err := promptForSelfUpdate(release.TagName)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+
+	if err := applyReleaseUpdate(release); err != nil {
+		return false, err
+	}
+	fmt.Fprintln(os.Stdout, "Rerun your command to continue on the updated version.")
+	return true, nil
+}
+
+func applyReleaseUpdate(release githubRelease) error {
 	if release.TagName == "" {
 		return errors.New("latest release did not include a tag name")
 	}
