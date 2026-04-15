@@ -52,35 +52,44 @@ type Config struct {
 	Strict              bool
 	DryRun              bool
 	Apply               bool
+	NoInput             bool
+	ConfigPath          string
+	SecretStorePath     string
+	Profile             string
+	Redacted            bool
+	HasSavedSecrets     bool
 }
 
 func parseConfig(args []string) (Config, error) {
-	if len(args) == 0 {
-		return Config{}, errUsage
+	command, remaining, err := parseCommand(args)
+	if err != nil {
+		return Config{}, err
 	}
 
-	command := args[0]
 	fs := flag.NewFlagSet(command, flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 
 	cfg := Config{Command: command}
-	fs.StringVar(&cfg.SourceBaseURL, "source-base-url", envOrDefault(envSourceBaseURL, ""), "Source Jira base URL")
-	fs.StringVar(&cfg.SourceAuthToken, "source-auth-token", envOrDefault(envSourceAuthToken, ""), "Source Jira auth token")
-	fs.StringVar(&cfg.SourceUsername, "source-username", envOrDefault(envSourceUsername, ""), "Source Jira username for basic auth")
-	fs.StringVar(&cfg.SourcePassword, "source-password", envOrDefault(envSourcePassword, ""), "Source Jira password for basic auth")
-	fs.StringVar(&cfg.TargetBaseURL, "target-base-url", envOrDefault(envTargetBaseURL, ""), "Target Jira base URL")
-	fs.StringVar(&cfg.TargetAuthToken, "target-auth-token", envOrDefault(envTargetAuthToken, ""), "Target Jira auth token")
-	fs.StringVar(&cfg.TargetUsername, "target-username", envOrDefault(envTargetUsername, ""), "Target Jira username for basic auth")
-	fs.StringVar(&cfg.TargetPassword, "target-password", envOrDefault(envTargetPassword, ""), "Target Jira password for basic auth")
-	fs.StringVar(&cfg.IdentityMappingFile, "identity-mapping", envOrDefault(envIdentityMapping, ""), "Path to identity mapping CSV")
-	fs.StringVar(&cfg.TeamsFile, "teams-file", envOrDefault(envTeamsFile, ""), "Path to source teams JSON export")
-	fs.StringVar(&cfg.PersonsFile, "persons-file", envOrDefault(envPersonsFile, ""), "Path to source persons JSON export")
-	fs.StringVar(&cfg.ResourcesFile, "resources-file", envOrDefault(envResourcesFile, ""), "Path to source resources JSON export")
-	fs.StringVar(&cfg.IssuesCSV, "issues-csv", envOrDefault(envIssuesCSV, ""), "Path to issues CSV")
-	fs.StringVar(&cfg.OutputDir, "output-dir", envOrDefault(envOutputDir, "out"), "Directory for generated reports")
-	fs.StringVar(&cfg.ReportInput, "input", envOrDefault(envReportInput, ""), "Input JSON report for the report subcommand")
+	fs.StringVar(&cfg.SourceBaseURL, "source-base-url", envValue(envSourceBaseURL), "Source Jira base URL")
+	fs.StringVar(&cfg.SourceAuthToken, "source-auth-token", envValue(envSourceAuthToken), "Source Jira auth token")
+	fs.StringVar(&cfg.SourceUsername, "source-username", envValue(envSourceUsername), "Source Jira username for basic auth")
+	fs.StringVar(&cfg.SourcePassword, "source-password", envValue(envSourcePassword), "Source Jira password for basic auth")
+	fs.StringVar(&cfg.TargetBaseURL, "target-base-url", envValue(envTargetBaseURL), "Target Jira base URL")
+	fs.StringVar(&cfg.TargetAuthToken, "target-auth-token", envValue(envTargetAuthToken), "Target Jira auth token")
+	fs.StringVar(&cfg.TargetUsername, "target-username", envValue(envTargetUsername), "Target Jira username for basic auth")
+	fs.StringVar(&cfg.TargetPassword, "target-password", envValue(envTargetPassword), "Target Jira password for basic auth")
+	fs.StringVar(&cfg.IdentityMappingFile, "identity-mapping", envValue(envIdentityMapping), "Path to identity mapping CSV")
+	fs.StringVar(&cfg.TeamsFile, "teams-file", envValue(envTeamsFile), "Path to source teams JSON export")
+	fs.StringVar(&cfg.PersonsFile, "persons-file", envValue(envPersonsFile), "Path to source persons JSON export")
+	fs.StringVar(&cfg.ResourcesFile, "resources-file", envValue(envResourcesFile), "Path to source resources JSON export")
+	fs.StringVar(&cfg.IssuesCSV, "issues-csv", envValue(envIssuesCSV), "Path to issues CSV")
+	fs.StringVar(&cfg.OutputDir, "output-dir", envValue(envOutputDir), "Directory for generated reports")
+	fs.StringVar(&cfg.ReportInput, "input", envValue(envReportInput), "Input JSON report for the report subcommand")
+	fs.StringVar(&cfg.ConfigPath, "config", defaultConfigPath(), "Path to config.yaml profile store")
+	fs.StringVar(&cfg.Profile, "profile", envValue(envProfile), "Saved profile name from config.yaml")
+	fs.BoolVar(&cfg.Redacted, "redacted", true, "Redact secrets in config show output")
 
-	reportFormat := envOrDefault(envReportFormat, string(ReportFormatJSON))
+	reportFormat := envValue(envReportFormat)
 	fs.StringVar(&reportFormat, "format", reportFormat, "Report format: json or csv")
 
 	cfg.Strict = boolEnv(envStrict, false)
@@ -88,14 +97,50 @@ func parseConfig(args []string) (Config, error) {
 	fs.BoolVar(&cfg.Strict, "strict", cfg.Strict, "Exit non-zero when warnings or errors are present")
 	fs.BoolVar(&cfg.DryRun, "dry-run", cfg.DryRun, "Preview mutating operations without sending writes")
 	fs.BoolVar(&cfg.Apply, "apply", false, "Execute mutating operations; overrides dry-run for migrate")
+	fs.BoolVar(&cfg.NoInput, "no-input", false, "Disable interactive prompts and require flags or environment variables")
 
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(remaining); err != nil {
 		return Config{}, err
 	}
 
-	cfg.ReportFormat = ReportFormat(strings.ToLower(reportFormat))
+	store, err := loadProfileStore(cfg.ConfigPath)
+	if err != nil {
+		return Config{}, fmt.Errorf("loading config store: %w", err)
+	}
+	applySavedProfile(&cfg, resolveProfile(cfg, store))
+	cfg.SecretStorePath = defaultSecretStorePath(cfg.ConfigPath)
+
+	selectedProfile := cfg.Profile
+	if selectedProfile == "" {
+		if store.CurrentProfile != "" {
+			selectedProfile = store.CurrentProfile
+		} else {
+			selectedProfile = "default"
+		}
+	}
+	cfg.Profile = selectedProfile
+	cfg.HasSavedSecrets = secretStoreHasProfile(cfg.SecretStorePath, cfg.Profile)
+
+	if strings.TrimSpace(reportFormat) != "" {
+		cfg.ReportFormat = ReportFormat(strings.ToLower(reportFormat))
+	}
+	if cfg.ReportFormat == "" {
+		cfg.ReportFormat = ReportFormatJSON
+	}
+	if cfg.OutputDir == "" {
+		cfg.OutputDir = "out"
+	}
 	if cfg.Apply {
 		cfg.DryRun = false
+	}
+
+	if cfg.Command != "config init" && cfg.Command != "config show" && cfg.Command != "config path" && !cfg.NoInput {
+		if err := loadSecretsIntoConfig(&cfg); err != nil {
+			return Config{}, err
+		}
+		if err := completeConfigInteractively(&cfg); err != nil {
+			return Config{}, err
+		}
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -103,6 +148,22 @@ func parseConfig(args []string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func parseCommand(args []string) (string, []string, error) {
+	if len(args) == 0 {
+		return "", nil, errUsage
+	}
+	if args[0] == "config" {
+		if len(args) < 2 {
+			return "", nil, errUsage
+		}
+		if args[1] != "init" && args[1] != "show" && args[1] != "path" {
+			return "", nil, fmt.Errorf("unknown config subcommand %q", args[1])
+		}
+		return "config " + args[1], args[2:], nil
+	}
+	return args[0], args[1:], nil
 }
 
 func (c Config) validate() error {
@@ -113,7 +174,7 @@ func (c Config) validate() error {
 	}
 
 	switch c.Command {
-	case "validate", "plan", "migrate", "report":
+	case "validate", "plan", "migrate", "report", "config init", "config show", "config path":
 	default:
 		return fmt.Errorf("unknown command %q", c.Command)
 	}
@@ -129,7 +190,7 @@ func (c Config) requireCoreInputs() []Finding {
 	var findings []Finding
 
 	if c.IdentityMappingFile == "" {
-		findings = append(findings, newFinding(SeverityError, "missing_identity_mapping", "Identity mapping CSV is required"))
+		findings = append(findings, newFinding(SeverityInfo, "identity_mapping_optional", "No identity mapping CSV supplied; the tool will try to auto-resolve users by matching source and target emails"))
 	}
 
 	if c.SourceBaseURL == "" && c.TeamsFile == "" {
@@ -195,11 +256,12 @@ func validateIdentityMappingFile(path string) []Finding {
 	return nil
 }
 
-func envOrDefault(key, fallback string) string {
-	if value, ok := os.LookupEnv(key); ok {
-		return value
+func envValue(key string) string {
+	value, ok := os.LookupEnv(key)
+	if !ok {
+		return ""
 	}
-	return fallback
+	return value
 }
 
 func boolEnv(key string, fallback bool) bool {
@@ -226,5 +288,5 @@ func ensureOutputDir(path string) error {
 
 func defaultOutputPath(cfg Config) string {
 	ext := string(cfg.ReportFormat)
-	return filepath.Join(cfg.OutputDir, fmt.Sprintf("%s-report.%s", cfg.Command, ext))
+	return filepath.Join(cfg.OutputDir, fmt.Sprintf("%s-report.%s", strings.ReplaceAll(cfg.Command, " ", "-"), ext))
 }

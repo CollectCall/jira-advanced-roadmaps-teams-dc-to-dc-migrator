@@ -24,12 +24,7 @@ func runPlan(cfg Config) Report {
 	}
 
 	state, findings, actions := executeMigration(cfg, false)
-	report.Findings = append(report.Findings, findings...)
-	report.Actions = append(report.Actions, actions...)
-	report.Metadata = migrationMetadata(state)
-	report.Findings = append(report.Findings, newFinding(SeverityInfo, "plan_generated", "Execution plan generated from source and target data"))
-	finalizeReport(&report)
-	return report
+	return populateExecutionReport(report, state, findings, actions, "plan_generated", "Execution plan generated from source and target data")
 }
 
 func runMigrate(cfg Config) Report {
@@ -41,9 +36,7 @@ func runMigrate(cfg Config) Report {
 	}
 
 	state, findings, actions := executeMigration(cfg, !cfg.DryRun)
-	report.Findings = append(report.Findings, findings...)
-	report.Actions = append(report.Actions, actions...)
-	report.Metadata = migrationMetadata(state)
+	report = populateExecutionReport(report, state, findings, actions, "", "")
 	if !cfg.DryRun {
 		report.Findings = append(report.Findings, newFinding(SeverityInfo, "apply_mode_active", "Apply mode executed remote write operations where mappings were resolvable"))
 	} else {
@@ -51,6 +44,19 @@ func runMigrate(cfg Config) Report {
 	}
 	finalizeReport(&report)
 	return report
+}
+
+func runPreview(cfg Config) Report {
+	report := newReport(cfg)
+	report.DryRun = true
+	report.Findings = append(report.Findings, cfg.requireCoreInputs()...)
+	if hasErrors(report.Findings) {
+		finalizeReport(&report)
+		return report
+	}
+
+	state, findings, actions := executeMigration(cfg, false)
+	return populateExecutionReport(report, state, findings, actions, "apply_preview", "Preview generated before apply mode confirmation")
 }
 
 func runReport(cfg Config) (Report, error) {
@@ -104,6 +110,8 @@ func newReport(cfg Config) Report {
 }
 
 func finalizeReport(report *Report) {
+	report.Stats = ReportStats{}
+	report.ExitBehavior.StrictIssuesDetected = false
 	for _, finding := range report.Findings {
 		switch finding.Severity {
 		case SeverityInfo:
@@ -116,6 +124,17 @@ func finalizeReport(report *Report) {
 	}
 	report.Stats.Actions = len(report.Actions)
 	report.ExitBehavior.StrictIssuesDetected = report.Strict && (report.Stats.Warnings > 0 || report.Stats.Errors > 0)
+}
+
+func populateExecutionReport(report Report, state migrationState, findings []Finding, actions []Action, infoCode, infoMessage string) Report {
+	report.Findings = append(report.Findings, findings...)
+	report.Actions = append(report.Actions, actions...)
+	report.Metadata = migrationMetadata(state)
+	if infoCode != "" && infoMessage != "" {
+		report.Findings = append(report.Findings, newFinding(SeverityInfo, infoCode, infoMessage))
+	}
+	finalizeReport(&report)
+	return report
 }
 
 func newFinding(severity Severity, code, message string) Finding {
