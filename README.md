@@ -28,14 +28,6 @@ teams-migrator.exe config init
 The release installer downloads the latest published GitHub Release for your OS and CPU and installs the binary into `~/.local/bin` on Linux/macOS by default.
 If needed, add that directory to `PATH`.
 
-## Source Install
-
-```bash
-go install github.com/CollectCall/jira-plans-teams-dc-to-dc-migrator/cmd/teams-migrator@latest
-```
-
-Requires Go 1.26 or newer.
-
 ## Commands
 
 - `validate`: validate configuration and local inputs
