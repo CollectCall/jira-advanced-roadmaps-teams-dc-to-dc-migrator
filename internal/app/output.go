@@ -600,7 +600,6 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --dry-run               Preview mutating operations")
 	fmt.Fprintln(w, "  --apply                 Disable dry-run for migrate")
 	fmt.Fprintln(w, "  --no-input              Disable interactive prompts")
-	fmt.Fprintln(w, "  --purge-config          Remove the local config directory during uninstall")
 	fmt.Fprintln(w, "  --input                 Input report JSON for the report command")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Environment:")

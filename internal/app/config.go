@@ -49,7 +49,6 @@ type Config struct {
 	DryRun              bool
 	Apply               bool
 	NoInput             bool
-	PurgeConfig         bool
 	ConfigPath          string
 	Profile             string
 	Redacted            bool
@@ -91,7 +90,6 @@ func parseConfig(args []string) (Config, error) {
 	fs.BoolVar(&cfg.DryRun, "dry-run", cfg.DryRun, "Preview mutating operations without sending writes")
 	fs.BoolVar(&cfg.Apply, "apply", false, "Execute mutating operations; overrides dry-run for migrate")
 	fs.BoolVar(&cfg.NoInput, "no-input", false, "Disable interactive prompts and require flags or environment variables")
-	fs.BoolVar(&cfg.PurgeConfig, "purge-config", false, "Remove the local config directory during uninstall")
 
 	if err := fs.Parse(remaining); err != nil {
 		return Config{}, err

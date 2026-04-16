@@ -18,11 +18,10 @@ func runUninstall(cfg Config) error {
 		exePath = filepath.Clean(exePath)
 	}
 
-	if cfg.PurgeConfig {
-		configDir := filepath.Dir(cfg.ConfigPath)
-		if err := os.RemoveAll(configDir); err != nil {
-			return fmt.Errorf("removing config directory: %w", err)
-		}
+	configDir := filepath.Dir(cfg.ConfigPath)
+	fmt.Fprintf(os.Stdout, "Warning: uninstall removes the binary and the local config directory at %s\n", configDir)
+	if err := os.RemoveAll(configDir); err != nil {
+		return fmt.Errorf("removing config directory: %w", err)
 	}
 
 	if runtime.GOOS == "windows" {
@@ -30,9 +29,7 @@ func runUninstall(cfg Config) error {
 			return err
 		}
 		fmt.Fprintf(os.Stdout, "teams-migrator uninstall staged for %s\n", exePath)
-		if cfg.PurgeConfig {
-			fmt.Fprintf(os.Stdout, "Removed config directory for %s\n", cfg.ConfigPath)
-		}
+		fmt.Fprintf(os.Stdout, "Removed config directory for %s\n", cfg.ConfigPath)
 		return nil
 	}
 
@@ -41,9 +38,7 @@ func runUninstall(cfg Config) error {
 	}
 
 	fmt.Fprintf(os.Stdout, "Removed %s\n", exePath)
-	if cfg.PurgeConfig {
-		fmt.Fprintf(os.Stdout, "Removed config directory for %s\n", cfg.ConfigPath)
-	}
+	fmt.Fprintf(os.Stdout, "Removed config directory for %s\n", cfg.ConfigPath)
 	return nil
 }
 
