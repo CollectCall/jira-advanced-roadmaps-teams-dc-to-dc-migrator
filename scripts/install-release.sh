@@ -6,6 +6,7 @@ repo="CollectCall/jira-plans-teams-dc-to-dc-migrator"
 bin_name="teams-migrator"
 version="${VERSION:-latest}"
 install_dir="${INSTALL_DIR:-$HOME/.local/bin}"
+api_url="https://api.github.com/repos/${repo}/releases/latest"
 
 case "$(uname -s)" in
   Linux) os="linux" ;;
@@ -25,25 +26,45 @@ case "$(uname -m)" in
     ;;
 esac
 
-archive="teams-migrator_${version}_${os}_${arch}.tar.gz"
-if [ "$version" = "latest" ]; then
-  url="https://github.com/${repo}/releases/latest/download/${archive}"
-else
-  url="https://github.com/${repo}/releases/download/${version}/${archive}"
-fi
-
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT INT TERM
 
-download_to="$tmpdir/$archive"
-
 if command -v curl >/dev/null 2>&1; then
-  curl -fsSL "$url" -o "$download_to"
+  downloader="curl"
 elif command -v wget >/dev/null 2>&1; then
-  wget -qO "$download_to" "$url"
+  downloader="wget"
 else
   echo "curl or wget is required to download releases." >&2
   exit 1
+fi
+
+resolve_version() {
+  if [ "$version" != "latest" ]; then
+    printf '%s\n' "$version"
+    return 0
+  fi
+
+  if [ "$downloader" = "curl" ]; then
+    curl -fsSL "$api_url" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+  else
+    wget -qO- "$api_url" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+  fi
+}
+
+resolved_version="$(resolve_version)"
+if [ -z "$resolved_version" ]; then
+  echo "Failed to determine the latest release version." >&2
+  exit 1
+fi
+
+archive="teams-migrator_${resolved_version}_${os}_${arch}.tar.gz"
+download_to="$tmpdir/$archive"
+url="https://github.com/${repo}/releases/download/${resolved_version}/${archive}"
+
+if [ "$downloader" = "curl" ]; then
+  curl -fsSL "$url" -o "$download_to"
+else
+  wget -qO "$download_to" "$url"
 fi
 
 mkdir -p "$install_dir"

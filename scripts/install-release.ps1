@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 $Repo = "CollectCall/jira-plans-teams-dc-to-dc-migrator"
 $Version = if ($env:VERSION) { $env:VERSION } else { "latest" }
 $InstallDir = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $HOME "bin" }
+$LatestReleaseApi = "https://api.github.com/repos/$Repo/releases/latest"
 
 $arch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
     "X64" { "amd64" }
@@ -10,16 +11,21 @@ $arch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitect
     default { throw "Unsupported Windows architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)" }
 }
 
-$archive = "teams-migrator_${Version}_windows_${arch}.zip"
-if ($Version -eq "latest") {
-    $url = "https://github.com/$Repo/releases/latest/download/$archive"
-} else {
-    $url = "https://github.com/$Repo/releases/download/$Version/$archive"
-}
 $tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("teams-migrator-" + [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $tmpDir | Out-Null
 
 try {
+    $ResolvedVersion = if ($Version -eq "latest") {
+        (Invoke-RestMethod -Uri $LatestReleaseApi).tag_name
+    } else {
+        $Version
+    }
+    if ([string]::IsNullOrWhiteSpace($ResolvedVersion)) {
+        throw "Failed to determine the latest release version."
+    }
+
+    $archive = "teams-migrator_${ResolvedVersion}_windows_${arch}.zip"
+    $url = "https://github.com/$Repo/releases/download/$ResolvedVersion/$archive"
     $zipPath = Join-Path $tmpDir $archive
     Invoke-WebRequest -Uri $url -OutFile $zipPath
 
