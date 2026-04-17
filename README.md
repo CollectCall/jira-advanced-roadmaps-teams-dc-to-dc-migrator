@@ -13,6 +13,21 @@ curl -fsSL https://raw.githubusercontent.com/CollectCall/jira-plans-teams-dc-to-
 teams-migrator config init
 ```
 
+Manual install from a downloaded release artifact:
+
+1. Download the correct release asset from the [GitHub Releases page](https://github.com/CollectCall/jira-plans-teams-dc-to-dc-migrator/releases):
+   - `teams-migrator_<version>_linux_amd64.tar.gz`
+   - `teams-migrator_<version>_linux_arm64.tar.gz`
+2. Install it locally:
+
+```bash
+tar -xzf teams-migrator_<version>_linux_amd64.tar.gz
+mkdir -p ~/.local/bin
+install teams-migrator ~/.local/bin/teams-migrator
+export PATH="$HOME/.local/bin:$PATH"
+teams-migrator config init
+```
+
 ### macOS
 ```bash
 curl -fsSL https://raw.githubusercontent.com/CollectCall/jira-plans-teams-dc-to-dc-migrator/master/scripts/install-release.sh | sh
