@@ -45,12 +45,10 @@ func Run(args []string) int {
 			return ExitFailure
 		}
 		return ExitSuccess
-	case "validate":
-		report = runValidate(cfg)
 	case "plan":
 		report = runPlan(cfg)
 	case "migrate":
-		if !cfg.DryRun && !cfg.NoInput && isInteractiveTerminal() {
+		if runsMigratePhase(cfg.Command, cfg.Phase) && !cfg.DryRun && !cfg.NoInput && isInteractiveTerminal() {
 			state, findings := loadMigrationState(cfg)
 			_, previewFindings, previewActions := executeMigrationWithState(cfg, false, state, findings)
 			preview := populateExecutionReport(newReport(cfg), state, previewFindings, previewActions, "apply_preview", "Preview generated before apply mode confirmation")
@@ -80,7 +78,7 @@ func Run(args []string) int {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			return ExitFailure
 		}
-	case "config init":
+	case "init":
 		if err := runConfigInitWizard(cfg); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			return ExitFailure

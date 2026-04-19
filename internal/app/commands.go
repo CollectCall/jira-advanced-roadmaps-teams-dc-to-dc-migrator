@@ -7,14 +7,6 @@ import (
 	"time"
 )
 
-func runValidate(cfg Config) Report {
-	report := newReport(cfg)
-	report.Findings = append(report.Findings, cfg.requireCoreInputs()...)
-	report.Findings = append(report.Findings, newFinding(SeverityInfo, "validate_complete", "Validation completed"))
-	finalizeReport(&report)
-	return report
-}
-
 func runPlan(cfg Config) Report {
 	report := newReport(cfg)
 	report.Findings = append(report.Findings, cfg.requireCoreInputs()...)
@@ -35,12 +27,29 @@ func runMigrate(cfg Config) Report {
 		return report
 	}
 
-	state, findings, actions := executeMigration(cfg, !cfg.DryRun)
+	applyPhase := runsMigratePhase(cfg.Command, cfg.Phase) && !cfg.DryRun
+	state, findings, actions := executeMigration(cfg, applyPhase)
 	report = populateExecutionReport(report, state, findings, actions, "", "")
-	if !cfg.DryRun {
-		report.Findings = append(report.Findings, newFinding(SeverityInfo, "apply_mode_active", "Apply mode executed remote write operations where mappings were resolvable"))
-	} else {
-		report.Findings = append(report.Findings, newFinding(SeverityInfo, "dry_run_default", "Dry-run is active; no remote writes were sent"))
+	switch normalizeMigrationPhase(cfg.Phase) {
+	case phasePreMigrate:
+		report.Findings = append(report.Findings, newFinding(SeverityInfo, "pre_migrate_phase_complete", "Pre-migrate phase completed; no remote writes were sent"))
+	case phasePostMigrate:
+		report.Findings = append(report.Findings, newFinding(SeverityInfo, "post_migrate_phase_preview", "Post-migrate phase preview generated; apply mode is not implemented yet"))
+	case phaseMigrate:
+		if !cfg.DryRun {
+			report.Findings = append(report.Findings, newFinding(SeverityInfo, "apply_mode_active", "Apply mode executed remote write operations where mappings were resolvable"))
+		} else {
+			report.Findings = append(report.Findings, newFinding(SeverityInfo, "dry_run_default", "Dry-run is active; no remote writes were sent"))
+		}
+	default:
+		if !cfg.DryRun {
+			report.Findings = append(report.Findings, newFinding(SeverityInfo, "apply_mode_active", "Apply mode executed remote write operations where mappings were resolvable"))
+		} else {
+			report.Findings = append(report.Findings, newFinding(SeverityInfo, "dry_run_default", "Dry-run is active; no remote writes were sent"))
+		}
+	}
+	if !runsMigratePhase(cfg.Command, cfg.Phase) && !cfg.DryRun {
+		report.Findings = append(report.Findings, newFinding(SeverityError, "phase_apply_unsupported", fmt.Sprintf("%s does not support apply mode", normalizeMigrationPhase(cfg.Phase))))
 	}
 	finalizeReport(&report)
 	return report
@@ -83,6 +92,7 @@ func runReport(cfg Config) (Report, error) {
 func newReport(cfg Config) Report {
 	return Report{
 		Command:     cfg.Command,
+		Phase:       cfg.Phase,
 		DryRun:      cfg.DryRun,
 		Strict:      cfg.Strict,
 		GeneratedAt: time.Now().UTC(),
@@ -95,13 +105,16 @@ func newReport(cfg Config) Report {
 			Mode:    targetMode(cfg),
 		},
 		Inputs: InputFiles{
-			IdentityMapping: cfg.IdentityMappingFile,
-			Teams:           cfg.TeamsFile,
-			Persons:         cfg.PersonsFile,
-			Resources:       cfg.ResourcesFile,
-			IssuesCSV:       cfg.IssuesCSV,
-			TeamScope:       cfg.TeamScope,
-			ScanFilters:     cfg.ScanFilters,
+			IdentityMapping:      cfg.IdentityMappingFile,
+			Teams:                cfg.TeamsFile,
+			Persons:              cfg.PersonsFile,
+			Resources:            cfg.ResourcesFile,
+			IssuesCSV:            cfg.IssuesCSV,
+			FilterSourceCSV:      cfg.FilterSourceCSV,
+			TeamScope:            cfg.TeamScope,
+			ScanFilters:          cfg.ScanFilters,
+			FilterTeamIDsInScope: cfg.FilterTeamIDsInScope,
+			FilterDataSource:     cfg.FilterDataSource,
 		},
 		ExitBehavior: ExitBehavior{
 			SuccessCode:     ExitSuccess,

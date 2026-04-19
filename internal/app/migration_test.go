@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -67,7 +68,7 @@ func TestBuildTeamMappingsSharedOnlySkipsNonSharedTeams(t *testing.T) {
 }
 
 func TestParseConfigAcceptsTeamScope(t *testing.T) {
-	cfg, err := parseConfig([]string{"validate", "--no-input", "--team-scope", "non-shared-only"})
+	cfg, err := parseConfig([]string{"plan", "--no-input", "--team-scope", "non-shared-only"})
 	if err != nil {
 		t.Fatalf("parseConfig returned error: %v", err)
 	}
@@ -99,6 +100,185 @@ func TestParseConfigAcceptsScanFiltersFlag(t *testing.T) {
 	}
 }
 
+func TestParseConfigDefaultsMigratePhase(t *testing.T) {
+	cfg, err := parseConfig([]string{"migrate", "--no-input", "--source-base-url", "https://source.example.com/jira", "--target-base-url", "https://target.example.com/jira"})
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if cfg.Phase != phaseMigrate {
+		t.Fatalf("expected default migrate phase %q, got %q", phaseMigrate, cfg.Phase)
+	}
+}
+
+func TestParseConfigAcceptsExplicitMigrationPhase(t *testing.T) {
+	cfg, err := parseConfig([]string{"migrate", "--no-input", "--phase", "post-migrate", "--source-base-url", "https://source.example.com/jira", "--target-base-url", "https://target.example.com/jira"})
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if cfg.Phase != phasePostMigrate {
+		t.Fatalf("expected explicit phase %q, got %q", phasePostMigrate, cfg.Phase)
+	}
+}
+
+func TestApplySavedProfileKeepsSkippedIdentityMappingAnswered(t *testing.T) {
+	cfg := Config{}
+	applySavedProfile(&cfg, SavedProfile{
+		IdentityMappingFile: "",
+		IdentityMappingSet:  true,
+	})
+	if !cfg.IdentityMappingSet {
+		t.Fatal("expected identity mapping preference to be marked configured")
+	}
+	if cfg.IdentityMappingFile != "" {
+		t.Fatalf("expected empty identity mapping file, got %q", cfg.IdentityMappingFile)
+	}
+}
+
+func TestSavedProfileFromConfigPersistsSkippedIdentityMappingAnswered(t *testing.T) {
+	profile := savedProfileFromConfig(Config{IdentityMappingSet: true}, false)
+	if !profile.IdentityMappingSet {
+		t.Fatal("expected saved profile to persist identity mapping configured state")
+	}
+	if profile.IdentityMappingFile != "" {
+		t.Fatalf("expected empty identity mapping file, got %q", profile.IdentityMappingFile)
+	}
+}
+
+func TestParseConfigLoadsSkippedIdentityMappingDecisionFromProfileStore(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := strings.Join([]string{
+		`current_profile: "default"`,
+		`profiles:`,
+		`  default:`,
+		`    source_base_url: "https://source.example.com/jira"`,
+		`    target_base_url: "https://target.example.com/jira"`,
+		`    identity_mapping_file: ""`,
+		`    identity_mapping_set: "true"`,
+		`    team_scope: "all"`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config store: %v", err)
+	}
+
+	cfg, err := parseConfig([]string{"migrate", "--no-input", "--config", configPath})
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if !cfg.IdentityMappingSet {
+		t.Fatal("expected identity mapping decision to load from profile store")
+	}
+	if cfg.IdentityMappingFile != "" {
+		t.Fatalf("expected identity mapping file to remain empty, got %q", cfg.IdentityMappingFile)
+	}
+	if cfg.Profile != "default" {
+		t.Fatalf("expected current profile default, got %q", cfg.Profile)
+	}
+}
+
+func TestParseConfigLoadsSkippedIdentityMappingDecisionFromLegacyProfileStore(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := strings.Join([]string{
+		`current_profile: "default"`,
+		`profiles:`,
+		`  default:`,
+		`    source_base_url: "https://source.example.com/jira"`,
+		`    target_base_url: "https://target.example.com/jira"`,
+		`    identity_mapping_file: ""`,
+		`    team_scope: "all"`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config store: %v", err)
+	}
+
+	cfg, err := parseConfig([]string{"migrate", "--no-input", "--config", configPath})
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if !cfg.IdentityMappingSet {
+		t.Fatal("expected legacy profile store to treat empty identity mapping as an answered skip")
+	}
+	if cfg.IdentityMappingFile != "" {
+		t.Fatalf("expected identity mapping file to remain empty, got %q", cfg.IdentityMappingFile)
+	}
+}
+
+func TestApplySavedProfileKeepsSkippedFilterScopeAnswered(t *testing.T) {
+	cfg := Config{}
+	applySavedProfile(&cfg, SavedProfile{
+		FilterTeamIDsInScope:    false,
+		FilterTeamIDsInScopeSet: true,
+		FilterDataSource:        filterDataSourceDatabaseCSV,
+		FilterSourceCSV:         "/tmp/source-filters.csv",
+	})
+	if !cfg.FilterTeamIDsInScopeSet {
+		t.Fatal("expected filter scope preference to be marked configured")
+	}
+	if cfg.FilterTeamIDsInScope {
+		t.Fatal("expected filter scope to remain false")
+	}
+	if cfg.FilterDataSource != filterDataSourceDatabaseCSV {
+		t.Fatalf("expected filter data source %q, got %q", filterDataSourceDatabaseCSV, cfg.FilterDataSource)
+	}
+	if cfg.FilterSourceCSV != "/tmp/source-filters.csv" {
+		t.Fatalf("expected filter source CSV to be applied, got %q", cfg.FilterSourceCSV)
+	}
+}
+
+func TestSavedProfileFromConfigPersistsFilterScopeSettings(t *testing.T) {
+	profile := savedProfileFromConfig(Config{
+		FilterTeamIDsInScope:        true,
+		FilterTeamIDsInScopeSet:     true,
+		FilterDataSource:            filterDataSourceScriptRunner,
+		FilterSourceCSV:             "/tmp/source-filters.csv",
+		FilterScriptRunnerInstalled: true,
+		FilterScriptRunnerEndpoint:  "https://source.example.com/jira/rest/scriptrunner/latest/custom/findTeamFiltersDB?enabled=true&lastId=0&limit=500&teamFieldId=16604",
+	}, false)
+	if !profile.FilterTeamIDsInScope || !profile.FilterTeamIDsInScopeSet {
+		t.Fatalf("expected filter scope settings to persist, got %#v", profile)
+	}
+	if profile.FilterDataSource != filterDataSourceScriptRunner {
+		t.Fatalf("expected filter data source %q, got %q", filterDataSourceScriptRunner, profile.FilterDataSource)
+	}
+	if !profile.FilterScriptRunnerInstalled {
+		t.Fatal("expected ScriptRunner installed flag to persist")
+	}
+	if profile.FilterScriptRunnerEndpoint == "" {
+		t.Fatal("expected ScriptRunner endpoint to persist")
+	}
+	if profile.FilterSourceCSV != "/tmp/source-filters.csv" {
+		t.Fatalf("expected filter source CSV to persist, got %q", profile.FilterSourceCSV)
+	}
+}
+
+func TestAssignProfileFieldParsesIdentityMappingSet(t *testing.T) {
+	profile := SavedProfile{}
+	assignProfileField(&profile, "identity_mapping_set", "true")
+	if !profile.IdentityMappingSet {
+		t.Fatal("expected identity_mapping_set to parse as true")
+	}
+}
+
+func TestAssignProfileFieldParsesFilterScopeSettings(t *testing.T) {
+	profile := SavedProfile{}
+	assignProfileField(&profile, "filter_team_ids_in_scope", "true")
+	assignProfileField(&profile, "filter_team_ids_in_scope_set", "true")
+	assignProfileField(&profile, "filter_data_source", "database")
+	assignProfileField(&profile, "filter_source_csv", "/tmp/source-filters.csv")
+	assignProfileField(&profile, "filter_scriptrunner_installed", "false")
+	if !profile.FilterTeamIDsInScope || !profile.FilterTeamIDsInScopeSet {
+		t.Fatalf("expected filter scope flags to parse, got %#v", profile)
+	}
+	if profile.FilterDataSource != filterDataSourceDatabaseCSV {
+		t.Fatalf("expected filter data source %q, got %q", filterDataSourceDatabaseCSV, profile.FilterDataSource)
+	}
+	if profile.FilterScriptRunnerInstalled {
+		t.Fatal("expected ScriptRunner installed flag to parse as false")
+	}
+	if profile.FilterSourceCSV != "/tmp/source-filters.csv" {
+		t.Fatalf("expected filter source CSV to parse, got %q", profile.FilterSourceCSV)
+	}
+}
+
 func TestRequireCoreInputsErrorsWhenScanFiltersEnabledWithoutSourceURL(t *testing.T) {
 	findings := (Config{ScanFilters: true}).requireCoreInputs()
 	for _, finding := range findings {
@@ -107,6 +287,61 @@ func TestRequireCoreInputsErrorsWhenScanFiltersEnabledWithoutSourceURL(t *testin
 		}
 	}
 	t.Fatalf("expected missing_source_base_url_for_filter_scan error, got %#v", findings)
+}
+
+func TestRequireCoreInputsErrorsWhenPreMigrateApplyRequested(t *testing.T) {
+	findings := (Config{Command: "migrate", Phase: phasePreMigrate, DryRun: false}).requireCoreInputs()
+	for _, finding := range findings {
+		if finding.Code == "pre_migrate_apply_unsupported" && finding.Severity == SeverityError {
+			return
+		}
+	}
+	t.Fatalf("expected pre_migrate_apply_unsupported error, got %#v", findings)
+}
+
+func TestRequireCoreInputsErrorsWhenPreMigrateFilterCSVMissing(t *testing.T) {
+	findings := (Config{
+		Command:              "migrate",
+		Phase:                phasePreMigrate,
+		DryRun:               true,
+		FilterTeamIDsInScope: true,
+		FilterDataSource:     filterDataSourceDatabaseCSV,
+	}).requireCoreInputs()
+	for _, finding := range findings {
+		if finding.Code == "pre_migrate_filter_csv_missing" && finding.Severity == SeverityError {
+			return
+		}
+	}
+	t.Fatalf("expected pre_migrate_filter_csv_missing error, got %#v", findings)
+}
+
+func TestRequireCoreInputsErrorsWhenPreMigrateScriptRunnerNotInstalled(t *testing.T) {
+	findings := (Config{
+		Command:                     "migrate",
+		Phase:                       phasePreMigrate,
+		DryRun:                      true,
+		FilterTeamIDsInScope:        true,
+		FilterDataSource:            filterDataSourceScriptRunner,
+		FilterScriptRunnerInstalled: false,
+		SourceBaseURL:               "https://source.example.com/jira",
+	}).requireCoreInputs()
+	for _, finding := range findings {
+		if finding.Code == "pre_migrate_filter_endpoint_not_installed" && finding.Severity == SeverityError {
+			return
+		}
+	}
+	t.Fatalf("expected pre_migrate_filter_endpoint_not_installed error, got %#v", findings)
+}
+
+func TestValidatePostMigratePhaseStateErrorsWhenTeamsStillNeedCreation(t *testing.T) {
+	findings := validatePostMigratePhaseState(migrationState{
+		TeamMappings: []TeamMapping{
+			{SourceTeamID: 10, SourceTitle: "Red Team", Decision: "add"},
+		},
+	})
+	if len(findings) != 1 || findings[0].Code != "post_migrate_phase_blocked" {
+		t.Fatalf("expected post_migrate_phase_blocked error, got %#v", findings)
+	}
 }
 
 func TestBuildTeamMappingsWarnsOnSameIDDifferentTitle(t *testing.T) {
