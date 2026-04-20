@@ -1,0 +1,30 @@
+name: Feature request
+description: Propose a narrowly scoped improvement.
+title: "feat(scope): "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Focus requests on migration safety, operator ergonomics, or supported Jira Server/Data Center workflows.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What operator problem are you trying to solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and rollback considerations
+      description: Describe any write risk, ambiguity, or reviewability concerns.
+    validations:
+      required: true

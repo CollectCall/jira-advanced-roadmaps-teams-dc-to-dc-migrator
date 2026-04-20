@@ -1,0 +1,3 @@
+Filter ID,Filter Name,Owner,JQL
+10001,Shared Team Board,alex.new@example.com,"project = MIG AND Team = 123"
+10002,Core Team Work,jamie.new@example.com,"project = CORE AND Team in (456, 789)"
