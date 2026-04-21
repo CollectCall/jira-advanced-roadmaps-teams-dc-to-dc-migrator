@@ -1,8 +1,8 @@
 # Jira Advanced Roadmaps Teams Migrator
 
 [![Release](https://img.shields.io/github/v/release/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator)](https://github.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/releases)
-[![CI](https://img.shields.io/github/actions/workflow/status/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/ci.yml?branch=master&label=ci)](https://github.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/actions/workflows/ci.yml)
-[![Smoke Test](https://img.shields.io/github/actions/workflow/status/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/smoke-test.yml?branch=master&label=smoke)](https://github.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/actions/workflows/smoke-test.yml)
+[![CI](https://github.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/actions/workflows/ci.yml/badge.svg)](https://github.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/actions/workflows/ci.yml)
+[![Smoke Test](https://github.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/actions/workflows/smoke-test.yml/badge.svg)](https://github.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/actions/workflows/smoke-test.yml)
 [![License](https://img.shields.io/github/license/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator)](./LICENSE)
 
 `teams-migrator` is a Go CLI for migrating Jira Advanced Roadmaps teams and team memberships between Jira Server or Data Center instances. It prepares reviewable artifacts first, then applies only the team, membership, and optional follow-up corrections that can be matched safely.
