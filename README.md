@@ -14,13 +14,9 @@ This project does not support Jira Cloud.
 Advanced Roadmaps team data is awkward to move between Jira Server/Data Center environments. This CLI is built for operators who want:
 
 - a dry-run-first migration flow
-- reviewable JSON and CSV artifacts
+- reviewable JSON and CSV artifacts for comparing source and target environments, including mapping support for manual plan and program migration work
 - support for team and membership migration
 - optional Parent Link and saved filter Team ID corrections after target team IDs exist
-
-## Project status
-
-This repository is in an early public stage. The CLI is usable, but the supported migration paths are intentionally narrow and conservative. Expect the interface and docs to keep improving quickly while the core safety model stays strict.
 
 ## Supported environments
 
