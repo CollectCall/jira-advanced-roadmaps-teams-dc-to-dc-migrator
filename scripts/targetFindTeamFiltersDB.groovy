@@ -105,7 +105,7 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
         }
 
         if (clause instanceof NotClause) {
-            return hasTeamIdClause(clause.subClause)
+            return notClauseChildren(clause).any { hasTeamIdClause(it) }
         }
 
         return false
@@ -246,4 +246,24 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
     ]
 
     return Response.ok(new JsonBuilder(response).toString()).build()
+}
+
+List<Clause> notClauseChildren(NotClause clause) {
+
+    for (propertyName in ["subClause", "clause", "clauses"]) {
+        if (!clause.hasProperty(propertyName)) continue
+
+        def value = clause[propertyName]
+        if (!value) continue
+
+        if (value instanceof Collection) {
+            return value.findAll { it instanceof Clause } as List<Clause>
+        }
+
+        if (value instanceof Clause) {
+            return [value]
+        }
+    }
+
+    return []
 }

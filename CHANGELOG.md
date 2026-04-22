@@ -6,6 +6,8 @@ The format is based on Keep a Changelog and the versioning model used in this re
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-04-22
+
 ### Added
 
 - public project baseline docs and community files
@@ -17,6 +19,11 @@ The format is based on Keep a Changelog and the versioning model used in this re
 
 - README rewritten for public-facing onboarding and operator clarity
 - smoke test workflow updated to use `config show`
+- documented the required ScriptRunner `local` database resource for filter endpoint setup
+
+### Fixed
+
+- ScriptRunner filter endpoints now handle Jira versions that expose `NotClause` children through different property names
 
 ## [1.3.2] - 2026-04-15
 

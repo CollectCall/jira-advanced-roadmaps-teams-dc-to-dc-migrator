@@ -219,10 +219,30 @@ boolean containsTeamClause(Clause clause, String expectedField) {
     }
 
     if (clause instanceof NotClause) {
-        return containsTeamClause(clause.clause, expectedField)
+        return notClauseChildren(clause).any { containsTeamClause(it, expectedField) }
     }
 
     return false
+}
+
+List<Clause> notClauseChildren(NotClause clause) {
+
+    for (propertyName in ["subClause", "clause", "clauses"]) {
+        if (!clause.hasProperty(propertyName)) continue
+
+        def value = clause[propertyName]
+        if (!value) continue
+
+        if (value instanceof Collection) {
+            return value.findAll { it instanceof Clause } as List<Clause>
+        }
+
+        if (value instanceof Clause) {
+            return [value]
+        }
+    }
+
+    return []
 }
 
 boolean isTeamClauseMatch(TerminalClause clause, String expectedField) {

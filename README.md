@@ -189,6 +189,8 @@ Install and publish these endpoint scripts in the Jira ScriptRunner app:
 - `scripts/sourceFindTeamFiltersDB.groovy` as `/rest/scriptrunner/latest/custom/findTeamFiltersDB`
 - `scripts/targetFindTeamFiltersDB.groovy` as `/rest/scriptrunner/latest/custom/findTargetTeamFiltersDB`
 
+The endpoints also require a ScriptRunner database resource named exactly `local`. In ScriptRunner, go to Resources, add a local database resource, set the name to `local`, and leave the SQL field empty.
+
 The endpoints require Jira admin permission and basic auth. `init` verifies them during setup when the source Jira base URL is available.
 
 ### DB-derived CSV option
