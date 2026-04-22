@@ -1,6 +1,7 @@
 import com.onresolve.scriptrunner.runner.rest.common.CustomEndpointDelegate
 import groovy.json.JsonBuilder
 import groovy.transform.BaseScript
+import groovy.transform.Field
 
 import javax.ws.rs.core.MultivaluedMap
 import javax.ws.rs.core.Response
@@ -19,6 +20,8 @@ import com.onresolve.scriptrunner.db.DatabaseUtil
 import org.ofbiz.core.entity.DelegatorInterface
 
 @BaseScript CustomEndpointDelegate delegate
+
+@Field static String DB_PRODUCT = null
 
 findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String body, HttpServletRequest request ->
 
@@ -52,9 +55,19 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
         return Response.status(400).entity("Endpoint disabled").build()
     }
 
-    Long lastId = (queryParams.getFirst("lastId") ?: "0") as Long
-    Integer limit = (queryParams.getFirst("limit") ?: "500") as Integer
+    Long lastId
+    Integer limit
     String teamFieldId = queryParams.getFirst("teamFieldId")
+
+    try {
+        lastId = (queryParams.getFirst("lastId") ?: "0") as Long
+        limit = (queryParams.getFirst("limit") ?: "500") as Integer
+    } catch (Exception ignored) {
+        return Response.status(400).entity("Invalid numeric parameters").build()
+    }
+
+    lastId = Math.max(lastId, 0)
+    limit = Math.max(1, Math.min(limit, 1000))
 
     String filterName = queryParams.getFirst("filterName")
     String owner = queryParams.getFirst("owner")
@@ -63,6 +76,10 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
     def ownersCsv = queryParams.getFirst("ownersCsv")?.split(",")*.trim()
 
     def norm = { it?.toLowerCase()?.trim() }
+    def filterNameNorm = norm(filterName)
+    def ownerNorm = norm(owner)
+    def namesNorm = normalizedValues(namesCsv)
+    def ownersNorm = normalizedValues(ownersCsv)
 
     def jqlParser = ComponentAccessor.getComponent(JqlQueryParser)
 
@@ -117,17 +134,49 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
     boolean usedFallback = false
 
     try {
+        if (DB_PRODUCT == null) {
+            DatabaseUtil.withSql('local') { sql ->
+                DB_PRODUCT = sql.connection.metaData.databaseProductName.toLowerCase()
+            }
+        }
+
+        def useSqlLimit = DB_PRODUCT.contains("postgres") || DB_PRODUCT.contains("mysql")
+        if (!useSqlLimit) {
+            throw new UnsupportedOperationException("Database product does not support this endpoint's LIMIT query path: ${DB_PRODUCT}")
+        }
+
+        def whereParts = ["id > ?"]
+        def params = [lastId]
+
+        if (filterNameNorm) {
+            whereParts << "LOWER(filtername) = ?"
+            params << filterNameNorm
+        } else if (namesNorm) {
+            whereParts << "LOWER(filtername) IN (${placeholders(namesNorm.size())})"
+            params.addAll(namesNorm)
+        }
+
+        if (ownerNorm) {
+            whereParts << "LOWER(authorname) = ?"
+            params << ownerNorm
+        } else if (ownersNorm) {
+            whereParts << "LOWER(authorname) IN (${placeholders(ownersNorm.size())})"
+            params.addAll(ownersNorm)
+        }
+
+        params << limit
+
         def query = """
             SELECT id, filtername, authorname, reqcontent
             FROM searchrequest
-            WHERE id > ?
+            WHERE ${whereParts.join(" AND ")}
             ORDER BY id
             LIMIT ?
-        """
+        """.toString()
 
         DatabaseUtil.withSql('local') { sql ->
 
-            sql.eachRow(query, [lastId, limit]) { row ->
+            sql.eachRow(query, params) { row ->
 
                 scanned++
 
@@ -138,16 +187,8 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
                 def author = row.authorname as String
                 def jql = row.reqcontent as String
 
-                def nameNorm = norm(name)
-                def authorNorm = norm(author)
-
-                // narrowing
-                if (filterName && nameNorm != norm(filterName)) return
-                if (owner && authorNorm != norm(owner)) return
-                if (namesCsv && !namesCsv.collect { norm(it) }.contains(nameNorm)) return
-                if (ownersCsv && !ownersCsv.collect { norm(it) }.contains(authorNorm)) return
-
                 if (!jql) return
+                if (!jqlMayContainTeamClause(jql)) return
 
                 try {
                     def parsed = jqlParser.parseQuery(jql)
@@ -201,12 +242,13 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
             def nameNorm = norm(name)
             def authorNorm = norm(author)
 
-            if (filterName && nameNorm != norm(filterName)) continue
-            if (owner && authorNorm != norm(owner)) continue
-            if (namesCsv && !namesCsv.collect { norm(it) }.contains(nameNorm)) continue
-            if (ownersCsv && !ownersCsv.collect { norm(it) }.contains(authorNorm)) continue
+            if (filterNameNorm && nameNorm != filterNameNorm) continue
+            if (ownerNorm && authorNorm != ownerNorm) continue
+            if (namesNorm && !namesNorm.contains(nameNorm)) continue
+            if (ownersNorm && !ownersNorm.contains(authorNorm)) continue
 
             if (!jql) continue
+            if (!jqlMayContainTeamClause(jql)) continue
 
             try {
                 def parsed = jqlParser.parseQuery(jql)
@@ -246,6 +288,26 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
     ]
 
     return Response.ok(new JsonBuilder(response).toString()).build()
+}
+
+List<String> normalizedValues(Collection values) {
+
+    if (!values) return []
+
+    return values
+        .collect { it?.toString()?.toLowerCase()?.trim() }
+        .findAll { it }
+        .unique()
+}
+
+String placeholders(int count) {
+    return (1..count).collect { "?" }.join(", ")
+}
+
+boolean jqlMayContainTeamClause(String jql) {
+
+    def lower = jql?.toLowerCase()
+    return lower?.contains("team") || lower?.contains("cf[")
 }
 
 List<Clause> notClauseChildren(NotClause clause) {
