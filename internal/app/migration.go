@@ -93,7 +93,7 @@ func executeMigrationWithState(cfg Config, apply bool, state migrationState, fin
 	}
 
 	if runsPostMigratePhase(cfg.Command, cfg.Phase) {
-		findings = append(findings, preparePostMigrationTargetArtifacts(cfg, &state)...)
+		findings = append(findings, preparePostMigrationTargetArtifacts(cfg, &state, nil)...)
 		execActions, execFindings := applyPostMigrationCorrections(cfg, targetClient, &state)
 		actions = append(actions, execActions...)
 		findings = append(findings, execFindings...)
@@ -223,13 +223,13 @@ func preparePostMigrationCorrectionArtifacts(cfg Config, state *migrationState) 
 	return findings, actions
 }
 
-func preparePostMigrationTargetArtifacts(cfg Config, state *migrationState) []Finding {
-	findings := preparePostMigrationTargetIssueArtifacts(cfg, state)
-	findings = append(findings, preparePostMigrationTargetParentLinkArtifacts(cfg, state)...)
-	return append(findings, preparePostMigrationTargetFilterArtifacts(cfg, state)...)
+func preparePostMigrationTargetArtifacts(cfg Config, state *migrationState, progress *progressTracker) []Finding {
+	findings := preparePostMigrationTargetIssueArtifacts(cfg, state, progress)
+	findings = append(findings, preparePostMigrationTargetParentLinkArtifacts(cfg, state, progress)...)
+	return append(findings, preparePostMigrationTargetFilterArtifacts(cfg, state, progress)...)
 }
 
-func preparePostMigrationTargetIssueArtifacts(cfg Config, state *migrationState) []Finding {
+func preparePostMigrationTargetIssueArtifacts(cfg Config, state *migrationState, progress *progressTracker) []Finding {
 	if len(state.IssueTeamRows) == 0 {
 		return nil
 	}
@@ -237,39 +237,40 @@ func preparePostMigrationTargetIssueArtifacts(cfg Config, state *migrationState)
 	state.TargetIssueSnapshots = nil
 	state.IssueComparisons = nil
 
+	progressStart(progress, "Resolving target Teams field for issue comparison")
 	targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
 	if err != nil {
+		progressEnd(progress)
 		return []Finding{newFinding(SeverityWarning, "post_migrate_target_issue_client", fmt.Sprintf("Could not create target Jira client for issue lookup: %v", err))}
 	}
 
 	fields, err := targetClient.ListFields()
 	if err != nil {
+		progressEnd(progress)
 		return []Finding{newFinding(SeverityWarning, "post_migrate_target_issue_field_lookup_failed", fmt.Sprintf("Could not load target Jira fields for issue comparison: %v", err))}
 	}
 
 	selection, selectionFindings := selectTeamsField(fields)
 	findings := append([]Finding{}, selectionFindings...)
 	if selection == nil {
+		progressEnd(progress)
 		return append(findings, newFinding(SeverityWarning, "post_migrate_target_issue_field_missing", "Could not resolve the target Jira Teams field for issue comparison"))
 	}
+	progressEnd(progress)
 
 	findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_issue_lookup_started", fmt.Sprintf("Resolving target issues for %d issue/team rows using Teams field %s (%s)", len(state.IssueTeamRows), selection.Field.Name, selection.Field.ID)))
 
-	fetchedIssues := map[string]JiraIssue{}
-	for _, row := range state.IssueTeamRows {
-		issueKey := strings.TrimSpace(row.IssueKey)
-		if issueKey == "" {
-			continue
-		}
-		if _, ok := fetchedIssues[issueKey]; ok {
-			continue
-		}
-		issue, err := targetClient.GetIssue(issueKey, []string{"summary", "project", "projectType", selection.Field.ID})
-		if err != nil {
-			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_issue_fetch_failed", fmt.Sprintf("Could not fetch target issue %s: %v", issueKey, err)))
-			continue
-		}
-		fetchedIssues[issueKey] = *issue
+	issueKeys := uniqueIssueKeysFromTeamRows(state.IssueTeamRows)
+	progressStartCount(progress, "Fetching target issues for team comparison")
+	fetchedIssues, err := targetClient.SearchIssuesByKeys(issueKeys, []string{"summary", "project", "projectType", selection.Field.ID}, func(current, total int) {
+		progressUpdateCount(progress, current, total)
+	})
+	if err != nil {
+		findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_issue_fetch_failed", fmt.Sprintf("Could not fetch target issues for team comparison: %v", err)))
+	}
+	progressEnd(progress)
+	for _, issueKey := range missingIssueKeys(issueKeys, fetchedIssues) {
+		findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_issue_fetch_failed", fmt.Sprintf("Could not fetch target issue %s: issue was not returned by target Jira search", issueKey)))
 	}
 
 	snapshotRows := buildTargetIssueSnapshotRows(selection.Field.ID, fetchedIssues)
@@ -303,7 +304,7 @@ func preparePostMigrationTargetIssueArtifacts(cfg Config, state *migrationState)
 	return findings
 }
 
-func preparePostMigrationTargetParentLinkArtifacts(cfg Config, state *migrationState) []Finding {
+func preparePostMigrationTargetParentLinkArtifacts(cfg Config, state *migrationState, progress *progressTracker) []Finding {
 	if !cfg.ParentLinkInScope || len(state.ParentLinkRows) == 0 {
 		return nil
 	}
@@ -311,56 +312,53 @@ func preparePostMigrationTargetParentLinkArtifacts(cfg Config, state *migrationS
 	state.TargetParentLinkSnapshots = nil
 	state.ParentLinkComparisons = nil
 
+	progressStart(progress, "Resolving target Parent Link field")
 	targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
 	if err != nil {
+		progressEnd(progress)
 		return []Finding{newFinding(SeverityWarning, "post_migrate_target_parent_link_client", fmt.Sprintf("Could not create target Jira client for Parent Link lookup: %v", err))}
 	}
 
 	fields, err := targetClient.ListFields()
 	if err != nil {
+		progressEnd(progress)
 		return []Finding{newFinding(SeverityWarning, "post_migrate_target_parent_link_field_lookup_failed", fmt.Sprintf("Could not load target Jira fields for Parent Link comparison: %v", err))}
 	}
 
 	field, selectionFindings := selectParentLinkField(fields)
 	findings := append([]Finding{}, selectionFindings...)
 	if field == nil {
+		progressEnd(progress)
 		return append(findings, newFinding(SeverityWarning, "post_migrate_target_parent_link_field_missing", "Could not resolve the target Jira Parent Link field for comparison"))
 	}
+	progressEnd(progress)
 
 	findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_parent_link_lookup_started", fmt.Sprintf("Resolving target Parent Link state for %d source rows using field %s (%s)", len(state.ParentLinkRows), field.Name, field.ID)))
 
-	childIssues := map[string]JiraIssue{}
-	for _, row := range state.ParentLinkRows {
-		issueKey := strings.TrimSpace(row.IssueKey)
-		if issueKey == "" {
-			continue
-		}
-		if _, ok := childIssues[issueKey]; ok {
-			continue
-		}
-		issue, err := targetClient.GetIssue(issueKey, []string{"summary", "project", "projectType", field.ID})
-		if err != nil {
-			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_parent_link_child_fetch_failed", fmt.Sprintf("Could not fetch target child issue %s: %v", issueKey, err)))
-			continue
-		}
-		childIssues[issueKey] = *issue
+	childIssueKeys := uniqueChildIssueKeysFromParentLinkRows(state.ParentLinkRows)
+	progressStartCount(progress, "Fetching target child issues for Parent Link comparison")
+	childIssues, err := targetClient.SearchIssuesByKeys(childIssueKeys, []string{"summary", "project", "projectType", field.ID}, func(current, total int) {
+		progressUpdateCount(progress, current, total)
+	})
+	if err != nil {
+		findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_parent_link_child_fetch_failed", fmt.Sprintf("Could not fetch target child issues for Parent Link comparison: %v", err)))
+	}
+	progressEnd(progress)
+	for _, issueKey := range missingIssueKeys(childIssueKeys, childIssues) {
+		findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_parent_link_child_fetch_failed", fmt.Sprintf("Could not fetch target child issue %s: issue was not returned by target Jira search", issueKey)))
 	}
 
-	targetParents := map[string]JiraIssue{}
-	for _, row := range state.ParentLinkRows {
-		parentKey := strings.TrimSpace(row.SourceParentIssueKey)
-		if parentKey == "" {
-			continue
-		}
-		if _, ok := targetParents[parentKey]; ok {
-			continue
-		}
-		issue, err := targetClient.GetIssue(parentKey, []string{"summary", "project"})
-		if err != nil {
-			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_parent_lookup_failed", fmt.Sprintf("Could not fetch target parent issue %s: %v", parentKey, err)))
-			continue
-		}
-		targetParents[parentKey] = *issue
+	parentIssueKeys := uniqueParentIssueKeysFromParentLinkRows(state.ParentLinkRows)
+	progressStartCount(progress, "Fetching target parent issues for Parent Link comparison")
+	targetParents, err := targetClient.SearchIssuesByKeys(parentIssueKeys, []string{"summary", "project"}, func(current, total int) {
+		progressUpdateCount(progress, current, total)
+	})
+	if err != nil {
+		findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_parent_lookup_failed", fmt.Sprintf("Could not fetch target parent issues for Parent Link comparison: %v", err)))
+	}
+	progressEnd(progress)
+	for _, parentKey := range missingIssueKeys(parentIssueKeys, targetParents) {
+		findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_parent_lookup_failed", fmt.Sprintf("Could not fetch target parent issue %s: issue was not returned by target Jira search", parentKey)))
 	}
 
 	currentParentCache := map[string]JiraIssue{}
@@ -396,7 +394,7 @@ func preparePostMigrationTargetParentLinkArtifacts(cfg Config, state *migrationS
 	return findings
 }
 
-func preparePostMigrationTargetFilterArtifacts(cfg Config, state *migrationState) []Finding {
+func preparePostMigrationTargetFilterArtifacts(cfg Config, state *migrationState, progress *progressTracker) []Finding {
 	if !cfg.FilterTeamIDsInScope || len(state.FilterTeamClauseRows) == 0 {
 		return nil
 	}
@@ -406,15 +404,19 @@ func preparePostMigrationTargetFilterArtifacts(cfg Config, state *migrationState
 	state.FilterTargetMatches = nil
 	state.FilterComparisons = nil
 
+	progressStart(progress, "Resolving target Teams field for filter comparison")
 	targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
 	if err != nil {
+		progressEnd(progress)
 		return []Finding{newFinding(SeverityWarning, "post_migrate_target_filter_client", fmt.Sprintf("Could not create target Jira client for filter lookup: %v", err))}
 	}
 
 	teamFieldID, fieldLabel, err := resolveTeamsCustomFieldNumericID(targetClient)
 	if err != nil {
+		progressEnd(progress)
 		return []Finding{newFinding(SeverityWarning, "post_migrate_target_filter_field", fmt.Sprintf("Could not resolve target Teams field ID for filter lookup: %v", err))}
 	}
+	progressEnd(progress)
 
 	sourceFilters := uniqueSourceTeamIDFilters(state.FilterTeamClauseRows)
 	if len(sourceFilters) == 0 {
@@ -427,7 +429,9 @@ func preparePostMigrationTargetFilterArtifacts(cfg Config, state *migrationState
 
 	candidatesBySource := map[string][]JiraFilter{}
 	targetFilterIDs := map[string]struct{}{}
-	for _, sourceFilter := range sourceFilters {
+	progressStartCount(progress, "Resolving target filters by name and owner")
+	for i, sourceFilter := range sourceFilters {
+		progressUpdateCount(progress, i+1, len(sourceFilters))
 		candidates, candidateFindings, err := loadTargetFiltersForSourceFilter(targetClient, teamFieldID, sourceFilter)
 		findings = append(findings, candidateFindings...)
 		if err != nil {
@@ -439,6 +443,7 @@ func preparePostMigrationTargetFilterArtifacts(cfg Config, state *migrationState
 			targetFilterIDs[filter.ID] = struct{}{}
 		}
 	}
+	progressEnd(progress)
 
 	fetchedFilters := map[string]JiraFilter{}
 	filterIDs := make([]string, 0, len(targetFilterIDs))
@@ -446,7 +451,9 @@ func preparePostMigrationTargetFilterArtifacts(cfg Config, state *migrationState
 		filterIDs = append(filterIDs, id)
 	}
 	sort.Strings(filterIDs)
-	for _, id := range filterIDs {
+	progressStartCount(progress, "Fetching matched target filters")
+	for i, id := range filterIDs {
+		progressUpdateCount(progress, i+1, len(filterIDs))
 		filter, err := targetClient.GetFilter(id)
 		if err != nil {
 			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_filter_fetch_failed", fmt.Sprintf("Could not fetch target filter %s: %v", id, err)))
@@ -455,6 +462,7 @@ func preparePostMigrationTargetFilterArtifacts(cfg Config, state *migrationState
 		fetchedFilters[id] = *filter
 		state.TargetFilters = append(state.TargetFilters, *filter)
 	}
+	progressEnd(progress)
 
 	snapshotRows := buildTargetFilterSnapshotRows(fetchedFilters)
 	state.TargetFilterSnapshots = snapshotRows
@@ -524,6 +532,72 @@ func uniqueSourceTeamIDFilters(rows []FilterTeamClauseRow) []FilterTeamClauseRow
 		out = append(out, byFilterID[id])
 	}
 	return out
+}
+
+func uniqueIssueKeysFromTeamRows(rows []IssueTeamRow) []string {
+	seen := map[string]struct{}{}
+	keys := make([]string, 0, len(rows))
+	for _, row := range rows {
+		key := strings.TrimSpace(row.IssueKey)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func uniqueChildIssueKeysFromParentLinkRows(rows []ParentLinkRow) []string {
+	seen := map[string]struct{}{}
+	keys := make([]string, 0, len(rows))
+	for _, row := range rows {
+		key := strings.TrimSpace(row.IssueKey)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func uniqueParentIssueKeysFromParentLinkRows(rows []ParentLinkRow) []string {
+	seen := map[string]struct{}{}
+	keys := make([]string, 0, len(rows))
+	for _, row := range rows {
+		key := strings.TrimSpace(row.SourceParentIssueKey)
+		if key == "" {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func missingIssueKeys(keys []string, issues map[string]JiraIssue) []string {
+	missing := make([]string, 0)
+	for _, key := range keys {
+		trimmed := strings.TrimSpace(key)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := issues[trimmed]; ok {
+			continue
+		}
+		missing = append(missing, trimmed)
+	}
+	return missing
 }
 
 func loadTargetFiltersForSourceFilter(client *jiraClient, teamFieldID string, sourceFilter FilterTeamClauseRow) ([]JiraFilter, []Finding, error) {
@@ -1068,7 +1142,7 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 		}
 	}
 	if runsPostMigratePhase(cfg.Command, cfg.Phase) {
-		progressTotal++
+		progressTotal += 12
 	}
 	progress := newProgressTracker(progressTotal)
 	defer progress.Finish()
@@ -1326,11 +1400,9 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 	}
 
 	if runsPostMigratePhase(cfg.Command, cfg.Phase) {
-		progress.Start("Loading post-migration inputs")
-		postState, postFindings := loadPostMigrateInputs(cfg, state, sourceClient)
+		postState, postFindings := loadPostMigrateInputs(cfg, state, sourceClient, progress)
 		state = postState
 		findings = append(findings, postFindings...)
-		progress.End()
 	}
 
 	return state, findings
@@ -1366,10 +1438,11 @@ func validatePostMigratePhaseState(state migrationState) []Finding {
 	return []Finding{newFinding(SeverityError, "post_migrate_phase_blocked", message)}
 }
 
-func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraClient) (migrationState, []Finding) {
+func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraClient, progress *progressTracker) (migrationState, []Finding) {
 	findings := []Finding{}
 
 	if issuePath, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-teams.pre-migration.csv"); ok {
+		progressStart(progress, "Loading pre-migration issue/team export")
 		rows, err := loadIssueTeamRowsFromExport(issuePath)
 		if err != nil {
 			findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_export_reuse_failed", fmt.Sprintf("Could not reuse existing issue/team export %s: %v", issuePath, err)))
@@ -1384,10 +1457,12 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 			})
 			findings = append(findings, newFinding(SeverityInfo, "post_migrate_issue_export_reused", fmt.Sprintf("Reused existing issue/team export: %s", issuePath)))
 		}
+		progressEnd(progress)
 	}
 
 	if state.IssueExportPath == "" && sourceClient != nil {
-		selection, issueRows, issuePath, issueImportPath, issueFindings := exportIssuesWithTeamsField(cfg, sourceClient, state.SourceTeams, nil)
+		progressStartCount(progress, "Rebuilding source issue/team export")
+		selection, issueRows, issuePath, issueImportPath, issueFindings := exportIssuesWithTeamsField(cfg, sourceClient, state.SourceTeams, progress)
 		state.TeamsField = selection
 		state.IssueTeamRows = issueRows
 		findings = append(findings, issueFindings...)
@@ -1409,6 +1484,7 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 				Count: len(issueRows),
 			})
 		}
+		progressEnd(progress)
 	}
 
 	if state.IssueExportPath == "" {
@@ -1416,6 +1492,7 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 	}
 
 	if parentPath, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-parent-link.pre-migration.csv"); ok {
+		progressStart(progress, "Loading pre-migration Parent Link export")
 		rows, err := loadParentLinkRowsFromExport(parentPath)
 		if err != nil {
 			findings = append(findings, newFinding(SeverityWarning, "post_migrate_parent_link_export_reuse_failed", fmt.Sprintf("Could not reuse existing parent-link export %s: %v", parentPath, err)))
@@ -1429,10 +1506,12 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 			})
 			findings = append(findings, newFinding(SeverityInfo, "post_migrate_parent_link_export_reused", fmt.Sprintf("Reused existing parent-link export: %s", parentPath)))
 		}
+		progressEnd(progress)
 	}
 
 	if len(state.ParentLinkRows) == 0 && cfg.ParentLinkInScope && sourceClient != nil {
-		_, rows, exportPath, parentFindings := exportIssuesWithParentLink(cfg, sourceClient, nil)
+		progressStartCount(progress, "Rebuilding source Parent Link export")
+		_, rows, exportPath, parentFindings := exportIssuesWithParentLink(cfg, sourceClient, progress)
 		state.ParentLinkRows = rows
 		findings = append(findings, parentFindings...)
 		if exportPath != "" {
@@ -1443,6 +1522,7 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 				Count: len(rows),
 			})
 		}
+		progressEnd(progress)
 	}
 
 	if cfg.ParentLinkInScope && len(state.ParentLinkRows) == 0 {
@@ -1450,6 +1530,7 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 	}
 
 	if filterPath, ok := latestOutputFamilyPath(cfg.OutputDir, "filters-with-team-clauses.pre-migration.csv"); ok {
+		progressStart(progress, "Loading pre-migration filter Team-clause export")
 		rows, err := loadFilterTeamClauseRowsFromExport(filterPath)
 		if err != nil {
 			findings = append(findings, newFinding(SeverityWarning, "post_migrate_filter_export_reuse_failed", fmt.Sprintf("Could not reuse existing filter export %s: %v", filterPath, err)))
@@ -1464,15 +1545,40 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 			})
 			findings = append(findings, newFinding(SeverityInfo, "post_migrate_filter_export_reused", fmt.Sprintf("Reused existing filter Team-clause export: %s", filterPath)))
 		}
+		progressEnd(progress)
 	}
 
 	if len(state.FilterTeamClauseRows) == 0 && cfg.FilterTeamIDsInScope {
 		findings = append(findings, newFinding(SeverityError, "post_migrate_filter_input_missing", "Post-migrate phase needs the pre-migrate source filter export. Run pre-migrate first so the source list of filters with team IDs is resolved and exported."))
 	}
 
-	findings = append(findings, preparePostMigrationTargetArtifacts(cfg, &state)...)
+	findings = append(findings, preparePostMigrationTargetArtifacts(cfg, &state, progress)...)
 
 	return state, findings
+}
+
+func progressStart(progress *progressTracker, label string) {
+	if progress != nil {
+		progress.Start(label)
+	}
+}
+
+func progressStartCount(progress *progressTracker, label string) {
+	if progress != nil {
+		progress.StartCount(label)
+	}
+}
+
+func progressUpdateCount(progress *progressTracker, current, total int) {
+	if progress != nil {
+		progress.UpdateCount(current, total)
+	}
+}
+
+func progressEnd(progress *progressTracker) {
+	if progress != nil {
+		progress.End()
+	}
 }
 
 func buildTeamMappings(cfg Config, sourceTeams, targetTeams []TeamDTO, sourcePlans []PlanDTO, planMappings []PlanMapping) ([]TeamMapping, []Finding) {

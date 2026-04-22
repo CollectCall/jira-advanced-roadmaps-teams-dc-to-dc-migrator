@@ -28,7 +28,7 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
     long start = System.currentTimeMillis()
 
     // =========================
-    // 🔒 AUTH (EXPLICIT BASIC AUTH)
+    // AUTH (EXPLICIT BASIC AUTH)
     // =========================
     def authHeader = request.getHeader("Authorization")
     if (!authHeader?.startsWith("Basic ")) {
@@ -91,7 +91,7 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
     long lastScannedId = lastId
 
     // =========================
-    // 🔍 CLAUSE DETECTOR (STRICT)
+    // CLAUSE DETECTOR (STRICT)
     // =========================
     def hasTeamIdClause
     hasTeamIdClause = { Clause clause ->
@@ -129,7 +129,7 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
     }
 
     // =========================
-    // 🔍 DB ACCESS (SQL + FALLBACK)
+    // DB ACCESS (SQL + FALLBACK)
     // =========================
     boolean usedFallback = false
 

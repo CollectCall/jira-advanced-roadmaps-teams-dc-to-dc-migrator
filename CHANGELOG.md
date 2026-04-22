@@ -6,6 +6,18 @@ The format is based on Keep a Changelog and the versioning model used in this re
 
 ## [Unreleased]
 
+## [1.3.4] - 2026-04-22
+
+### Changed
+
+- post-migrate target issue lookups now use batched issue-key searches to reduce target Jira REST requests
+- post-migrate progress now reports specific input loading and target lookup steps
+- target ScriptRunner filter lookup pushes name and owner narrowing into SQL for supported databases
+
+### Fixed
+
+- Jira REST requests now retry rate-limited and transient target API responses with bounded backoff
+
 ## [1.3.3] - 2026-04-22
 
 ### Added

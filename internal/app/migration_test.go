@@ -2,14 +2,17 @@ package app
 
 import (
 	"encoding/csv"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func float64ptr(v float64) *float64 {
@@ -1052,7 +1055,7 @@ func TestPreparePostMigrationTargetFilterArtifactsWritesSnapshotMatchAndComparis
 		},
 	}
 
-	findings := preparePostMigrationTargetFilterArtifacts(cfg, &state)
+	findings := preparePostMigrationTargetFilterArtifacts(cfg, &state, nil)
 	for _, finding := range findings {
 		if finding.Severity == SeverityError {
 			t.Fatalf("unexpected error finding: %#v", findings)
@@ -1105,9 +1108,12 @@ func TestPreparePostMigrationTargetIssueArtifactsWritesSnapshotAndComparisonExpo
 		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/field":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[{"id":"customfield_18888","name":"Team","custom":true,"schema":{"custom":"com.atlassian.jpo:jpo-custom-field-team"}}]`))
-		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issue/ABC-1":
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/search":
+			if !strings.Contains(r.URL.Query().Get("jql"), `"ABC-1"`) {
+				t.Fatalf("expected search JQL to include ABC-1, got %q", r.URL.Query().Get("jql"))
+			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"10001","key":"ABC-1","fields":{"summary":"Demo issue","project":{"key":"ABC","name":"Demo Project","projectTypeKey":"software"},"customfield_18888":[{"id":42},{"id":7}]}}`))
+			_, _ = w.Write([]byte(`{"startAt":0,"maxResults":500,"total":1,"issues":[{"id":"10001","key":"ABC-1","fields":{"summary":"Demo issue","project":{"key":"ABC","name":"Demo Project","projectTypeKey":"software"},"customfield_18888":[{"id":42},{"id":7}]}}]}`))
 		default:
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
@@ -1140,7 +1146,7 @@ func TestPreparePostMigrationTargetIssueArtifactsWritesSnapshotAndComparisonExpo
 		},
 	}
 
-	findings := preparePostMigrationTargetIssueArtifacts(cfg, &state)
+	findings := preparePostMigrationTargetIssueArtifacts(cfg, &state, nil)
 	for _, finding := range findings {
 		if finding.Severity == SeverityError {
 			t.Fatalf("unexpected error finding: %#v", findings)
@@ -1183,12 +1189,12 @@ func TestPreparePostMigrationTargetParentLinkArtifactsWritesSnapshotAndCompariso
 				{"id":"customfield_18888","name":"Team","custom":true,"schema":{"custom":"com.atlassian.jpo:jpo-custom-field-team"}},
 				{"id":"customfield_19999","name":"Parent Link","custom":true,"schema":{"custom":"com.atlassian.jpo:jpo-custom-field-parent"}}
 			]`))
-		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issue/ABC-1":
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/search" && strings.Contains(r.URL.Query().Get("jql"), `"ABC-1"`):
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"10001","key":"ABC-1","fields":{"summary":"Child issue","project":{"key":"ABC","name":"Demo Project","projectTypeKey":"software"},"customfield_19999":{"id":"5001"}}}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issue/INIT-1":
+			_, _ = w.Write([]byte(`{"startAt":0,"maxResults":500,"total":1,"issues":[{"id":"10001","key":"ABC-1","fields":{"summary":"Child issue","project":{"key":"ABC","name":"Demo Project","projectTypeKey":"software"},"customfield_19999":{"id":"5001"}}}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/search" && strings.Contains(r.URL.Query().Get("jql"), `"INIT-1"`):
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"id":"6001","key":"INIT-1","fields":{"summary":"Parent issue","project":{"key":"INIT","name":"Initiatives","projectTypeKey":"software"}}}`))
+			_, _ = w.Write([]byte(`{"startAt":0,"maxResults":500,"total":1,"issues":[{"id":"6001","key":"INIT-1","fields":{"summary":"Parent issue","project":{"key":"INIT","name":"Initiatives","projectTypeKey":"software"}}}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issue/5001":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"id":"5001","key":"INIT-1","fields":{"summary":"Parent issue","project":{"key":"INIT","name":"Initiatives","projectTypeKey":"software"}}}`))
@@ -1224,7 +1230,7 @@ func TestPreparePostMigrationTargetParentLinkArtifactsWritesSnapshotAndCompariso
 		},
 	}
 
-	findings := preparePostMigrationTargetParentLinkArtifacts(cfg, &state)
+	findings := preparePostMigrationTargetParentLinkArtifacts(cfg, &state, nil)
 	for _, finding := range findings {
 		if finding.Severity == SeverityError {
 			t.Fatalf("unexpected error finding: %#v", findings)
@@ -1299,6 +1305,89 @@ func TestGetIssueAndUpdateIssueFields(t *testing.T) {
 	}
 	if !strings.Contains(updateBody, `"customfield_18888":[{"id":142}]`) {
 		t.Fatalf("expected update payload to contain rewritten team field, got %s", updateBody)
+	}
+}
+
+func TestJiraClientRetriesRateLimitedRequests(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			w.Header().Set("Retry-After", "0")
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"customfield_18888","name":"Team","custom":true}]`))
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+	fields, err := client.ListFields()
+	if err != nil {
+		t.Fatalf("ListFields returned error after retry: %v", err)
+	}
+	if len(fields) != 1 || requests != 2 {
+		t.Fatalf("expected one retry and one field, got %d requests and %#v fields", requests, fields)
+	}
+}
+
+func TestRetryAfterDelayParsesSecondsAndHTTPDate(t *testing.T) {
+	if got := retryAfterDelay("2"); got != 2*time.Second {
+		t.Fatalf("expected 2s Retry-After delay, got %v", got)
+	}
+
+	future := time.Now().Add(2 * time.Second).UTC().Format(http.TimeFormat)
+	if got := retryAfterDelay(future); got <= 0 {
+		t.Fatalf("expected positive HTTP-date Retry-After delay, got %v", got)
+	}
+}
+
+func TestSearchIssuesByKeysChunksRequests(t *testing.T) {
+	var searchRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/rest/api/2/search" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		searchRequests++
+		start := (searchRequests-1)*issueKeySearchChunkSize + 1
+		end := searchRequests * issueKeySearchChunkSize
+		if end > 120 {
+			end = 120
+		}
+		issues := make([]string, 0, end-start+1)
+		for i := start; i <= end; i++ {
+			key := "ABC-" + strconv.Itoa(i)
+			if !strings.Contains(r.URL.Query().Get("jql"), `"`+key+`"`) {
+				t.Fatalf("expected search JQL to contain %s, got %q", key, r.URL.Query().Get("jql"))
+			}
+			issues = append(issues, fmt.Sprintf(`{"id":"%d","key":"%s","fields":{"summary":"Issue %d"}}`, i, key, i))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"startAt":0,"maxResults":500,"total":%d,"issues":[%s]}`, len(issues), strings.Join(issues, ","))))
+	}))
+	defer server.Close()
+
+	keys := make([]string, 0, 120)
+	for i := 1; i <= 120; i++ {
+		keys = append(keys, "ABC-"+strconv.Itoa(i))
+	}
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+	issues, err := client.SearchIssuesByKeys(keys, []string{"summary"}, nil)
+	if err != nil {
+		t.Fatalf("SearchIssuesByKeys returned error: %v", err)
+	}
+	if searchRequests != 3 {
+		t.Fatalf("expected 3 chunked search requests, got %d", searchRequests)
+	}
+	if len(issues) != 120 {
+		t.Fatalf("expected 120 issues, got %d", len(issues))
 	}
 }
 
@@ -1390,6 +1479,9 @@ func TestExecuteMigrationWithStateAppliesPostMigrationCorrections(t *testing.T) 
 		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/field":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[{"id":"customfield_18888","name":"Team","custom":true,"schema":{"custom":"com.atlassian.jpo:jpo-custom-field-team"}}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/search":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"startAt":0,"maxResults":500,"total":1,"issues":[{"id":"10001","key":"ABC-1","fields":{"summary":"Demo issue","project":{"key":"ABC","name":"Demo Project","projectTypeKey":"software"},"customfield_18888":[{"id":42}]}}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issue/ABC-1":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"id":"10001","key":"ABC-1","fields":{"summary":"Demo issue","project":{"key":"ABC","name":"Demo Project","projectTypeKey":"software"},"customfield_18888":[{"id":42}]}}`))
@@ -1518,6 +1610,12 @@ func TestExecuteMigrationWithStateAppliesPostMigrationParentLinkCorrections(t *t
 		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/field":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`[{"id":"customfield_19999","name":"Parent Link","custom":true,"schema":{"custom":"com.atlassian.jpo:jpo-custom-field-parent"}}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/search" && strings.Contains(r.URL.Query().Get("jql"), `"ABC-1"`):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"startAt":0,"maxResults":500,"total":1,"issues":[{"id":"10001","key":"ABC-1","fields":{"summary":"Child issue","project":{"key":"ABC","name":"Demo Project","projectTypeKey":"software"},"customfield_19999":{"id":"5001"}}}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/search" && strings.Contains(r.URL.Query().Get("jql"), `"INIT-1"`):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"startAt":0,"maxResults":500,"total":1,"issues":[{"id":"6001","key":"INIT-1","fields":{"summary":"Parent issue","project":{"key":"INIT","name":"Initiatives","projectTypeKey":"software"}}}]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issue/ABC-1":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"id":"10001","key":"ABC-1","fields":{"summary":"Child issue","project":{"key":"ABC","name":"Demo Project","projectTypeKey":"software"},"customfield_19999":{"id":"5001"}}}`))
