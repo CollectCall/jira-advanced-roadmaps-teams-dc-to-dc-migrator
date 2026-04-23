@@ -321,6 +321,7 @@ type PostMigrationFilterComparisonRow struct {
 	SourceFilterID     string `json:"sourceFilterId"`
 	SourceFilterName   string `json:"sourceFilterName"`
 	SourceOwner        string `json:"sourceOwner,omitempty"`
+	SourceJQL          string `json:"sourceJql,omitempty"`
 	SourceClause       string `json:"sourceClause,omitempty"`
 	SourceTeamID       string `json:"sourceTeamId,omitempty"`
 	TargetFilterID     string `json:"targetFilterId,omitempty"`
@@ -336,10 +337,13 @@ type PostMigrationFilterComparisonRow struct {
 type PostMigrationFilterResultRow struct {
 	SourceFilterID     string `json:"sourceFilterId,omitempty"`
 	SourceFilterName   string `json:"sourceFilterName,omitempty"`
+	SourceJQL          string `json:"sourceJql,omitempty"`
 	TargetFilterID     string `json:"targetFilterId,omitempty"`
 	TargetFilterName   string `json:"targetFilterName,omitempty"`
 	CurrentTargetJQL   string `json:"currentTargetJql,omitempty"`
 	RewrittenTargetJQL string `json:"rewrittenTargetJql,omitempty"`
+	TargetJQLBefore    string `json:"targetJqlBefore,omitempty"`
+	TargetJQLAfter     string `json:"targetJqlAfter,omitempty"`
 	Status             string `json:"status"`
 	Message            string `json:"message,omitempty"`
 }

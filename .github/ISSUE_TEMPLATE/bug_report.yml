@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a reproducible problem in the CLI or migration workflow.
+title: "fix(scope): "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for reproducible bugs. Do not include secrets, raw credentials, or customer-identifying data.
+  - type: input
+    id: version
+    attributes:
+      label: CLI version
+      description: Output of `teams-migrator version`
+      placeholder: v1.3.2
+    validations:
+      required: true
+  - type: input
+    id: jira_versions
+    attributes:
+      label: Jira editions and versions
+      description: Source and target edition/version
+      placeholder: Source DC 9.x, target DC 9.x
+    validations:
+      required: true
+  - type: dropdown
+    id: run_mode
+    attributes:
+      label: Run mode
+      options:
+        - dry-run
+        - apply
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command used
+      render: shell
+      placeholder: teams-migrator migrate --profile default --phase pre-migrate --no-input
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: artifacts
+    attributes:
+      label: Sanitized logs or report snippets
+      description: Paste only sanitized output.
+      render: text

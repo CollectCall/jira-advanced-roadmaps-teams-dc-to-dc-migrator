@@ -70,12 +70,12 @@ findTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String body, 
     // =========================
     long lastId
     int limit
-    Long teamFieldId
+    String teamFieldId
 
     try {
         lastId = (queryParams.getFirst("lastId") ?: "0") as long
         limit  = (queryParams.getFirst("limit") ?: "200") as int
-        teamFieldId = (queryParams.getFirst("teamFieldId") ?: "") as Long
+        teamFieldId = queryParams.getFirst("teamFieldId") ?: ""
     } catch (Exception ignored) {
         return Response.status(400).entity("Invalid numeric parameters").build()
     }
@@ -86,8 +86,6 @@ findTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String body, 
 
     lastId = Math.max(lastId, 0)
     limit  = Math.max(1, Math.min(limit, 1000))
-
-    def expectedField = "cf[" + teamFieldId + "]"
 
     // =========================
     // SETUP
@@ -130,7 +128,7 @@ findTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String body, 
                 def id = (row.id as Long)
                 scanned++
                 lastScannedId = id
-                processSingle(id, searchRequestManager, jqlParser, expectedField, results, parseErrors)
+                processSingle(id, searchRequestManager, jqlParser, teamFieldId, results, parseErrors)
             }
         }
 
@@ -147,7 +145,7 @@ findTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String body, 
             def id = entity.getLong("id")
             scanned++
             lastScannedId = id
-            processSingle(id, searchRequestManager, jqlParser, expectedField, results, parseErrors)
+            processSingle(id, searchRequestManager, jqlParser, teamFieldId, results, parseErrors)
         }
     }
 
@@ -174,7 +172,7 @@ findTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String body, 
 // PROCESS
 // =========================
 
-def processSingle(id, srm, parser, expectedField, results, parseErrors) {
+def processSingle(id, srm, parser, teamFieldId, results, parseErrors) {
 
     def sr = srm.getSearchRequestById(id)
     def jql = sr?.query?.queryString
@@ -191,7 +189,7 @@ def processSingle(id, srm, parser, expectedField, results, parseErrors) {
         return
     }
 
-    if (containsTeamClause(parsed?.whereClause, expectedField)) {
+    if (containsTeamClause(parsed?.whereClause, teamFieldId)) {
         results << [
             id    : id,
             name  : sr?.name,
@@ -206,36 +204,73 @@ def processSingle(id, srm, parser, expectedField, results, parseErrors) {
 // MATCH LOGIC
 // =========================
 
-boolean containsTeamClause(Clause clause, String expectedField) {
+boolean containsTeamClause(Clause clause, String teamFieldId) {
 
     if (!clause) return false
 
     if (clause instanceof TerminalClause) {
-        return isTeamClauseMatch(clause, expectedField)
+        return isTeamClauseMatch(clause, teamFieldId)
     }
 
     if (clause instanceof AndClause || clause instanceof OrClause) {
-        return clause.clauses.any { containsTeamClause(it, expectedField) }
+        return clause.clauses.any { containsTeamClause(it, teamFieldId) }
     }
 
     if (clause instanceof NotClause) {
-        return containsTeamClause(clause.clause, expectedField)
+        return notClauseChildren(clause).any { containsTeamClause(it, teamFieldId) }
     }
 
     return false
 }
 
-boolean isTeamClauseMatch(TerminalClause clause, String expectedField) {
+List<Clause> notClauseChildren(NotClause clause) {
+
+    for (propertyName in ["subClause", "clause", "clauses"]) {
+        if (!clause.hasProperty(propertyName)) continue
+
+        def value = clause[propertyName]
+        if (!value) continue
+
+        if (value instanceof Collection) {
+            return value.findAll { it instanceof Clause } as List<Clause>
+        }
+
+        if (value instanceof Clause) {
+            return [value]
+        }
+    }
+
+    return []
+}
+
+boolean isTeamClauseMatch(TerminalClause clause, String teamFieldId) {
 
     def field = (clause.name ?: "").replaceAll('"','').toLowerCase()
     def op = clause.operator?.toString()
 
     def isTeamField =
         field == "team" ||
-        field == expectedField
+        field == "teams" ||
+        field ==~ /cf\[[0-9]+\]/ ||
+        (teamFieldId && field == "cf[${teamFieldId}]")
 
     def isSupportedOperator =
         op == "EQUALS" || op == "IN"
 
-    return isTeamField && isSupportedOperator
+    return isTeamField && isSupportedOperator && clauseHasNumericTeamOperand(clause.toString())
+}
+
+boolean clauseHasNumericTeamOperand(String clauseText) {
+    if (!clauseText) return false
+
+    def equalsMatch = clauseText =~ /(?i)\s*"?[^"]+"?\s*=\s*["']?([0-9]+)["']?\s*/
+    if (equalsMatch.matches()) return true
+
+    def inMatch = clauseText =~ /(?i)\s*"?[^"]+"?\s+in\s*\((.*)\)\s*/
+    if (!inMatch.matches()) return false
+
+    def rawValues = inMatch[0][1]
+    return rawValues.split(",").every { value ->
+        value.trim().replaceAll(/^["']|["']$/, "").isLong()
+    }
 }

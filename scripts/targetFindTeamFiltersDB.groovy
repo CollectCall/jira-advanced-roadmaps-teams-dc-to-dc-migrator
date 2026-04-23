@@ -1,6 +1,7 @@
 import com.onresolve.scriptrunner.runner.rest.common.CustomEndpointDelegate
 import groovy.json.JsonBuilder
 import groovy.transform.BaseScript
+import groovy.transform.Field
 
 import javax.ws.rs.core.MultivaluedMap
 import javax.ws.rs.core.Response
@@ -8,6 +9,7 @@ import javax.servlet.http.HttpServletRequest
 import java.util.Base64
 
 import com.atlassian.jira.component.ComponentAccessor
+import com.atlassian.jira.issue.search.SearchRequestManager
 import com.atlassian.jira.jql.parser.JqlQueryParser
 import com.atlassian.jira.security.Permissions
 import com.atlassian.jira.user.ApplicationUser
@@ -20,12 +22,14 @@ import org.ofbiz.core.entity.DelegatorInterface
 
 @BaseScript CustomEndpointDelegate delegate
 
+@Field static String DB_PRODUCT = null
+
 findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String body, HttpServletRequest request ->
 
     long start = System.currentTimeMillis()
 
     // =========================
-    // 🔒 AUTH (EXPLICIT BASIC AUTH)
+    // AUTH (EXPLICIT BASIC AUTH)
     // =========================
     def authHeader = request.getHeader("Authorization")
     if (!authHeader?.startsWith("Basic ")) {
@@ -52,9 +56,19 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
         return Response.status(400).entity("Endpoint disabled").build()
     }
 
-    Long lastId = (queryParams.getFirst("lastId") ?: "0") as Long
-    Integer limit = (queryParams.getFirst("limit") ?: "500") as Integer
+    Long lastId
+    Integer limit
     String teamFieldId = queryParams.getFirst("teamFieldId")
+
+    try {
+        lastId = (queryParams.getFirst("lastId") ?: "0") as Long
+        limit = (queryParams.getFirst("limit") ?: "500") as Integer
+    } catch (Exception ignored) {
+        return Response.status(400).entity("Invalid numeric parameters").build()
+    }
+
+    lastId = Math.max(lastId, 0)
+    limit = Math.max(1, Math.min(limit, 1000))
 
     String filterName = queryParams.getFirst("filterName")
     String owner = queryParams.getFirst("owner")
@@ -63,8 +77,13 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
     def ownersCsv = queryParams.getFirst("ownersCsv")?.split(",")*.trim()
 
     def norm = { it?.toLowerCase()?.trim() }
+    def filterNameNorm = norm(filterName)
+    def ownerNorm = norm(owner)
+    def namesNorm = normalizedValues(namesCsv)
+    def ownersNorm = normalizedValues(ownersCsv)
 
     def jqlParser = ComponentAccessor.getComponent(JqlQueryParser)
+    def searchRequestManager = ComponentAccessor.getComponent(SearchRequestManager)
 
     def results = []
     def parseErrors = []
@@ -74,7 +93,7 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
     long lastScannedId = lastId
 
     // =========================
-    // 🔍 CLAUSE DETECTOR (STRICT)
+    // CLAUSE DETECTOR (STRICT)
     // =========================
     def hasTeamIdClause
     hasTeamIdClause = { Clause clause ->
@@ -82,22 +101,19 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
         if (!clause) return false
 
         if (clause instanceof TerminalClause) {
-            def field = clause.name
-            def operator = clause.operator
-            def operand = clause.operand
+            def field = (clause.name ?: "").replaceAll('"', '').toLowerCase()
+            def operator = clause.operator?.toString()
 
             boolean fieldMatch =
                     (field == "team") ||
+                    (field == "teams") ||
+                    (field ==~ /cf\[[0-9]+\]/) ||
                     (teamFieldId && field == "cf[${teamFieldId}]")
 
             boolean operatorMatch =
-                    (operator == Operator.EQUALS || operator == Operator.IN)
+                    (operator == "EQUALS" || operator == "IN")
 
-            boolean operandIsId =
-                    (operand instanceof SingleValueOperand && operand.value?.isLong()) ||
-                    (operand instanceof MultiValueOperand && operand.values.every { it instanceof SingleValueOperand && it.value?.isLong() })
-
-            return fieldMatch && operatorMatch && operandIsId
+            return fieldMatch && operatorMatch && clauseHasNumericTeamOperand(clause.toString())
         }
 
         if (clause instanceof AndClause || clause instanceof OrClause) {
@@ -105,29 +121,61 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
         }
 
         if (clause instanceof NotClause) {
-            return hasTeamIdClause(clause.subClause)
+            return notClauseChildren(clause).any { hasTeamIdClause(it) }
         }
 
         return false
     }
 
     // =========================
-    // 🔍 DB ACCESS (SQL + FALLBACK)
+    // DB ACCESS (SQL + FALLBACK)
     // =========================
     boolean usedFallback = false
 
     try {
+        if (DB_PRODUCT == null) {
+            DatabaseUtil.withSql('local') { sql ->
+                DB_PRODUCT = sql.connection.metaData.databaseProductName.toLowerCase()
+            }
+        }
+
+        def useSqlLimit = DB_PRODUCT.contains("postgres") || DB_PRODUCT.contains("mysql")
+        if (!useSqlLimit) {
+            throw new UnsupportedOperationException("Database product does not support this endpoint's LIMIT query path: ${DB_PRODUCT}")
+        }
+
+        def whereParts = ["id > ?"]
+        def params = [lastId]
+
+        if (filterNameNorm) {
+            whereParts << "LOWER(filtername) = ?"
+            params << filterNameNorm
+        } else if (namesNorm) {
+            whereParts << "LOWER(filtername) IN (${placeholders(namesNorm.size())})"
+            params.addAll(namesNorm)
+        }
+
+        if (ownerNorm) {
+            whereParts << "LOWER(authorname) = ?"
+            params << ownerNorm
+        } else if (ownersNorm) {
+            whereParts << "LOWER(authorname) IN (${placeholders(ownersNorm.size())})"
+            params.addAll(ownersNorm)
+        }
+
+        params << limit
+
         def query = """
             SELECT id, filtername, authorname, reqcontent
             FROM searchrequest
-            WHERE id > ?
+            WHERE ${whereParts.join(" AND ")}
             ORDER BY id
             LIMIT ?
-        """
+        """.toString()
 
         DatabaseUtil.withSql('local') { sql ->
 
-            sql.eachRow(query, [lastId, limit]) { row ->
+            sql.eachRow(query, params) { row ->
 
                 scanned++
 
@@ -138,21 +186,13 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
                 def author = row.authorname as String
                 def jql = row.reqcontent as String
 
-                def nameNorm = norm(name)
-                def authorNorm = norm(author)
-
-                // narrowing
-                if (filterName && nameNorm != norm(filterName)) return
-                if (owner && authorNorm != norm(owner)) return
-                if (namesCsv && !namesCsv.collect { norm(it) }.contains(nameNorm)) return
-                if (ownersCsv && !ownersCsv.collect { norm(it) }.contains(authorNorm)) return
-
                 if (!jql) return
+                if (!jqlMayContainTeamClause(jql)) return
 
                 try {
-                    def parsed = jqlParser.parseQuery(jql)
+                    jqlParser.parseQuery(jql)
 
-                    if (!hasTeamIdClause(parsed?.whereClause)) return
+                    if (!jqlHasNumericTeamClause(jql, teamFieldId)) return
 
                     matched++
 
@@ -176,14 +216,8 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
 
         DelegatorInterface delegator = ComponentAccessor.getComponent(DelegatorInterface)
 
-        def rows = delegator.findList(
-                "SearchRequest",
-                null,
-                null,
-                ["id ASC"],
-                null,
-                false
-        )
+        def rows = delegator.findAll("SearchRequest")
+                .sort { it.getLong("id") }
 
         for (row in rows) {
 
@@ -194,24 +228,26 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
             scanned++
             lastScannedId = id
 
-            def name = row.getString("filtername")
-            def author = row.getString("authorname")
-            def jql = row.getString("reqcontent")
+            def searchRequest = searchRequestManager.getSearchRequestById(id)
+            def name = searchRequest?.name
+            def author = searchRequest?.owner?.name
+            def jql = searchRequest?.query?.queryString
 
             def nameNorm = norm(name)
             def authorNorm = norm(author)
 
-            if (filterName && nameNorm != norm(filterName)) continue
-            if (owner && authorNorm != norm(owner)) continue
-            if (namesCsv && !namesCsv.collect { norm(it) }.contains(nameNorm)) continue
-            if (ownersCsv && !ownersCsv.collect { norm(it) }.contains(authorNorm)) continue
+            if (filterNameNorm && nameNorm != filterNameNorm) continue
+            if (ownerNorm && authorNorm != ownerNorm) continue
+            if (namesNorm && !namesNorm.contains(nameNorm)) continue
+            if (ownersNorm && !ownersNorm.contains(authorNorm)) continue
 
             if (!jql) continue
+            if (!jqlMayContainTeamClause(jql)) continue
 
             try {
-                def parsed = jqlParser.parseQuery(jql)
+                jqlParser.parseQuery(jql)
 
-                if (!hasTeamIdClause(parsed?.whereClause)) continue
+                if (!jqlHasNumericTeamClause(jql, teamFieldId)) continue
 
                 matched++
 
@@ -246,4 +282,83 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
     ]
 
     return Response.ok(new JsonBuilder(response).toString()).build()
+}
+
+List<String> normalizedValues(Collection values) {
+
+    if (!values) return []
+
+    return values
+        .collect { it?.toString()?.toLowerCase()?.trim() }
+        .findAll { it }
+        .unique()
+}
+
+String placeholders(int count) {
+    return (1..count).collect { "?" }.join(", ")
+}
+
+boolean jqlMayContainTeamClause(String jql) {
+
+    def lower = jql?.toLowerCase()
+    return lower?.contains("team") || lower?.contains("cf[")
+}
+
+boolean jqlHasNumericTeamClause(String jql, String teamFieldId) {
+    if (!jql) return false
+
+    def fieldPattern = teamFieldId ?
+            /(?:"?team"?|\bteam\b|"?teams"?|\bteams\b|cf\[[0-9]+\]|cf\[\Q${teamFieldId}\E\])/ :
+            /(?:"?team"?|\bteam\b|"?teams"?|\bteams\b|cf\[[0-9]+\])/
+
+    def equalsPattern = ~/(?i)(^|[^A-Za-z0-9_])${fieldPattern}\s*=\s*["']?[0-9]+["']?([^A-Za-z0-9_]|$)/
+    if ((jql =~ equalsPattern).find()) return true
+
+    def inPattern = ~/(?i)(^|[^A-Za-z0-9_])${fieldPattern}\s+in\s*\(([^)]*)\)/
+    def matcher = jql =~ inPattern
+    while (matcher.find()) {
+        def rawValues = matcher.group(2)
+        if (!rawValues) continue
+        def values = rawValues.split(",")*.trim().findAll { it }
+        if (values && values.every { it.replaceAll(/^["']|["']$/, "").isLong() }) {
+            return true
+        }
+    }
+
+    return false
+}
+
+List<Clause> notClauseChildren(NotClause clause) {
+
+    for (propertyName in ["subClause", "clause", "clauses"]) {
+        if (!clause.hasProperty(propertyName)) continue
+
+        def value = clause[propertyName]
+        if (!value) continue
+
+        if (value instanceof Collection) {
+            return value.findAll { it instanceof Clause } as List<Clause>
+        }
+
+        if (value instanceof Clause) {
+            return [value]
+        }
+    }
+
+    return []
+}
+
+boolean clauseHasNumericTeamOperand(String clauseText) {
+    if (!clauseText) return false
+
+    def equalsMatch = clauseText =~ /(?i)\s*"?[^"]+"?\s*=\s*["']?([0-9]+)["']?\s*/
+    if (equalsMatch.matches()) return true
+
+    def inMatch = clauseText =~ /(?i)\s*"?[^"]+"?\s+in\s*\((.*)\)\s*/
+    if (!inMatch.matches()) return false
+
+    def rawValues = inMatch[0][1]
+    return rawValues.split(",").every { value ->
+        value.trim().replaceAll(/^["']|["']$/, "").isLong()
+    }
 }

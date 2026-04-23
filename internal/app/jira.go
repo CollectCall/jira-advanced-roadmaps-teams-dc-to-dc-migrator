@@ -15,8 +15,12 @@ import (
 
 const (
 	defaultPageSize                          = 500
+	issueKeySearchChunkSize                  = 50
 	teamsAPIMaxPageSize                      = 100
 	jpoAPIMaxPageSize                        = 100
+	jiraMaxRetryAttempts                     = 5
+	jiraInitialRetryDelay                    = 500 * time.Millisecond
+	jiraMaxRetryDelay                        = 10 * time.Second
 	teamFilterScriptRunnerEndpointPath       = "/rest/scriptrunner/latest/custom/findTeamFiltersDB"
 	teamFilterScriptRunnerScriptPath         = "scripts/sourceFindTeamFiltersDB.groovy"
 	targetTeamFilterScriptRunnerEndpointPath = "/rest/scriptrunner/latest/custom/findTargetTeamFiltersDB"
@@ -197,6 +201,80 @@ func (c *jiraClient) SearchIssues(jql string, fields []string, progress func(cur
 		}
 	}
 	return all, nil
+}
+
+func (c *jiraClient) SearchIssuesByKeys(keys []string, fields []string, progress func(current, total int)) (map[string]JiraIssue, error) {
+	out := map[string]JiraIssue{}
+	cleanKeys := uniqueTrimmedStrings(keys)
+	total := len(cleanKeys)
+	if total == 0 {
+		return out, nil
+	}
+
+	processed := 0
+	for _, chunk := range chunkStrings(cleanKeys, issueKeySearchChunkSize) {
+		jql := fmt.Sprintf("issuekey in (%s)", quoteJQLValues(chunk))
+		issues, err := c.SearchIssues(jql, fields, nil)
+		if err != nil {
+			return out, fmt.Errorf("searching target issues %d-%d of %d: %w", processed+1, processed+len(chunk), total, err)
+		}
+		for _, issue := range issues {
+			key := strings.TrimSpace(issue.Key)
+			if key == "" {
+				continue
+			}
+			out[key] = issue
+		}
+		processed += len(chunk)
+		if progress != nil {
+			progress(processed, total)
+		}
+	}
+
+	return out, nil
+}
+
+func uniqueTrimmedStrings(values []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToUpper(trimmed)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, trimmed)
+	}
+	return out
+}
+
+func chunkStrings(values []string, size int) [][]string {
+	if size <= 0 {
+		size = len(values)
+	}
+	chunks := make([][]string, 0, (len(values)+size-1)/size)
+	for start := 0; start < len(values); start += size {
+		end := start + size
+		if end > len(values) {
+			end = len(values)
+		}
+		chunks = append(chunks, values[start:end])
+	}
+	return chunks
+}
+
+func quoteJQLValues(values []string) string {
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		escaped := strings.ReplaceAll(value, `\`, `\\`)
+		escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+		quoted = append(quoted, `"`+escaped+`"`)
+	}
+	return strings.Join(quoted, ", ")
 }
 
 func (c *jiraClient) GetIssue(key string, fields []string) (*JiraIssue, error) {
@@ -445,47 +523,120 @@ func (c *jiraClient) doJSONAgainstBase(base, method, endpoint string, query url.
 		u.RawQuery = query.Encode()
 	}
 
-	var body io.Reader
+	var payloadBytes []byte
 	if payload != nil {
 		encoded, err := json.Marshal(payload)
 		if err != nil {
 			return nil, err
 		}
-		body = bytes.NewReader(encoded)
+		payloadBytes = encoded
 	}
 
-	req, err := http.NewRequest(method, u.String(), body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/json")
-	if payload != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if c.username != "" || c.password != "" {
-		req.SetBasicAuth(c.username, c.password)
-	}
+	var lastErr error
+	for attempt := 1; attempt <= jiraMaxRetryAttempts; attempt++ {
+		var body io.Reader
+		if payloadBytes != nil {
+			body = bytes.NewReader(payloadBytes)
+		}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+		req, err := http.NewRequest(method, u.String(), body)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Accept", "application/json")
+		if payload != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if c.username != "" || c.password != "" {
+			req.SetBasicAuth(c.username, c.password)
+		}
 
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			if attempt < jiraMaxRetryAttempts && method != http.MethodPost {
+				time.Sleep(retryDelay(attempt, 0))
+				continue
+			}
+			return nil, err
+		}
 
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, &jiraAPIError{
+		data, readErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return data, nil
+		}
+
+		apiErr := &jiraAPIError{
 			Method:     method,
 			Endpoint:   endpoint,
 			StatusCode: resp.StatusCode,
 			Message:    summarizeJiraError(data),
 		}
+		lastErr = apiErr
+
+		if attempt < jiraMaxRetryAttempts && shouldRetryJiraRequest(method, resp.StatusCode) {
+			time.Sleep(retryDelay(attempt, retryAfterDelay(resp.Header.Get("Retry-After"))))
+			continue
+		}
+
+		return nil, apiErr
 	}
-	return data, nil
+
+	return nil, lastErr
+}
+
+func shouldRetryJiraRequest(method string, statusCode int) bool {
+	if method == http.MethodPost {
+		return false
+	}
+	switch statusCode {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func retryDelay(attempt int, retryAfter time.Duration) time.Duration {
+	if retryAfter > 0 {
+		if retryAfter > jiraMaxRetryDelay {
+			return jiraMaxRetryDelay
+		}
+		return retryAfter
+	}
+	delay := jiraInitialRetryDelay
+	for i := 1; i < attempt; i++ {
+		delay *= 2
+		if delay >= jiraMaxRetryDelay {
+			return jiraMaxRetryDelay
+		}
+	}
+	return delay
+}
+
+func retryAfterDelay(value string) time.Duration {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(trimmed); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if when, err := http.ParseTime(trimmed); err == nil {
+		delay := time.Until(when)
+		if delay > 0 {
+			return delay
+		}
+	}
+	return 0
 }
 
 func listJPOPaged[T any](c *jiraClient, endpoint string, progress func(current, total int)) ([]T, error) {
