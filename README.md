@@ -186,7 +186,7 @@ If filter rewrites are in scope, the tool needs a source list of filters that co
 
 Install and publish these endpoint scripts in the Jira ScriptRunner app:
 
-- `scripts/sourceFindTeamFiltersDB.groovy` as `/rest/scriptrunner/latest/custom/findTeamFiltersDB`
+- `scripts/sourceFindTeamFiltersDB.groovy` as `/rest/scriptrunner/latest/custom/findSourceTeamFiltersDB`
 - `scripts/targetFindTeamFiltersDB.groovy` as `/rest/scriptrunner/latest/custom/findTargetTeamFiltersDB`
 
 The endpoints also require a ScriptRunner database resource named exactly `local`. In ScriptRunner, go to Resources, add a local database resource, set the name to `local`, and leave the SQL field empty.

@@ -16,9 +16,10 @@ func TestPrintSummaryShowsPhaseSectionsForTypedMetadata(t *testing.T) {
 
 	for _, want := range []string{
 		"Execution Phases",
-		"Pre-migrate [skipped]",
-		"Migrate [planned]",
+		"Pre-migrate [completed]",
+		"Migrate [up next]",
 		"Post-migrate [up next]",
+		"Planned actions: 1",
 		"Pre-migrate Preview",
 		"Migrate Preview",
 		"Post-migrate Preview",
@@ -63,6 +64,35 @@ func TestPrintSummaryShowsPhaseSectionsForDecodedJSONMetadata(t *testing.T) {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("summary did not contain %q after JSON decode:\n%s", want, rendered)
 		}
+	}
+}
+
+func TestPrintSummaryShowsConnectivityHintBeforeRawErrors(t *testing.T) {
+	report := Report{
+		Command: "migrate",
+		Phase:   phasePreMigrate,
+		DryRun:  true,
+		Source:  Endpoint{BaseURL: "https://source.example.com/jira", Mode: "api"},
+		Target:  Endpoint{BaseURL: "https://target.example.com/jira", Mode: "api"},
+		Findings: []Finding{
+			{Severity: SeverityError, Code: "source_teams_load", Message: `loading source teams: Get "https://source.example.com/jira/rest/teams-api/1.0/team": dial tcp: lookup source.example.com: no such host`},
+		},
+		Stats: ReportStats{Errors: 1},
+	}
+
+	var out bytes.Buffer
+	printSummary(&out, report, nil)
+	rendered := out.String()
+
+	hint := "Could not reach source/target Jira. Check base URL, VPN/DNS, and credentials."
+	if !strings.Contains(rendered, "Connectivity") || !strings.Contains(rendered, hint) {
+		t.Fatalf("summary did not contain connectivity hint:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, `https://source.example.com/jira/rest/teams-api/1.0/team`) {
+		t.Fatalf("summary did not keep raw endpoint error:\n%s", rendered)
+	}
+	if strings.Index(rendered, hint) > strings.LastIndex(rendered, "Errors") {
+		t.Fatalf("connectivity hint should appear before raw errors:\n%s", rendered)
 	}
 }
 

@@ -88,7 +88,7 @@ func executeMigrationWithState(cfg Config, apply bool, state migrationState, fin
 		return state, findings, actions
 	}
 
-	targetClient, err := newJiraClientWithCookie(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie)
+	targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
 	if err != nil {
 		findings = append(findings, newFinding(SeverityError, "target_client", err.Error()))
 		return state, findings, actions
@@ -245,7 +245,7 @@ func preparePostMigrationTargetIssueArtifacts(cfg Config, state *migrationState,
 	state.IssueComparisons = nil
 
 	progressStart(progress, "Resolving target Teams field for issue comparison")
-	targetClient, err := newJiraClientWithCookie(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie)
+	targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
 	if err != nil {
 		progressEnd(progress)
 		return []Finding{newFinding(SeverityWarning, "post_migrate_target_issue_client", fmt.Sprintf("Could not create target Jira client for issue lookup: %v", err))}
@@ -319,7 +319,7 @@ func preparePostMigrationTargetParentLinkArtifacts(cfg Config, state *migrationS
 	state.TargetParentLinkSnapshots = nil
 	state.ParentLinkComparisons = nil
 
-	targetClient, err := newJiraClientWithCookie(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie)
+	targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
 	if err != nil {
 		return []Finding{newFinding(SeverityWarning, "post_migrate_target_parent_link_client", fmt.Sprintf("Could not create target Jira client for Parent Link lookup: %v", err))}
 	}
@@ -480,7 +480,7 @@ func preparePostMigrationTargetFilterArtifacts(cfg Config, state *migrationState
 	state.FilterComparisons = nil
 
 	progressStart(progress, "Resolving target Teams field for filter comparison")
-	targetClient, err := newJiraClientWithCookie(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie)
+	targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
 	if err != nil {
 		progressEnd(progress)
 		return []Finding{newFinding(SeverityWarning, "post_migrate_target_filter_client", fmt.Sprintf("Could not create target Jira client for filter lookup: %v", err))}
@@ -1291,52 +1291,52 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 
 	runLoad("Loading source teams", "source_teams_load", SeverityError, func(progressFn func(current, total int)) error {
 		var loadErr error
-		sourceTeams, loadErr = loadTeams(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.SourceCookie, cfg.TeamsFile, progressFn)
+		sourceTeams, loadErr = loadTeams(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.TeamsFile, progressFn)
 		return loadErr
 	})
 	runLoad("Loading source programs", "source_programs_load", SeverityWarning, func(progressFn func(current, total int)) error {
 		var loadErr error
-		sourcePrograms, loadErr = loadPrograms(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.SourceCookie, progressFn)
+		sourcePrograms, loadErr = loadPrograms(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, progressFn)
 		return loadErr
 	})
 	runLoad("Loading source plans", "source_plans_load", SeverityWarning, func(progressFn func(current, total int)) error {
 		var loadErr error
-		sourcePlans, loadErr = loadPlans(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.SourceCookie, progressFn)
+		sourcePlans, loadErr = loadPlans(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, progressFn)
 		return loadErr
 	})
 	runLoad("Loading source persons", "source_persons_load", SeverityError, func(progressFn func(current, total int)) error {
 		var loadErr error
-		sourcePersons, loadErr = loadPersons(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.SourceCookie, cfg.PersonsFile, progressFn)
+		sourcePersons, loadErr = loadPersons(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.PersonsFile, progressFn)
 		return loadErr
 	})
 	runLoad("Loading source resources", "source_resources_load", SeverityError, func(progressFn func(current, total int)) error {
 		var loadErr error
-		sourceResources, loadErr = loadResources(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.SourceCookie, cfg.ResourcesFile, progressFn)
+		sourceResources, loadErr = loadResources(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.ResourcesFile, progressFn)
 		return loadErr
 	})
 	runLoad("Loading target teams", "target_teams_load", SeverityError, func(progressFn func(current, total int)) error {
 		var loadErr error
-		targetTeams, loadErr = loadTeams(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie, "", progressFn)
+		targetTeams, loadErr = loadTeams(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "", progressFn)
 		return loadErr
 	})
 	runLoad("Loading target programs", "target_programs_load", SeverityWarning, func(progressFn func(current, total int)) error {
 		var loadErr error
-		targetPrograms, loadErr = loadPrograms(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie, progressFn)
+		targetPrograms, loadErr = loadPrograms(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, progressFn)
 		return loadErr
 	})
 	runLoad("Loading target plans", "target_plans_load", SeverityWarning, func(progressFn func(current, total int)) error {
 		var loadErr error
-		targetPlans, loadErr = loadPlans(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie, progressFn)
+		targetPlans, loadErr = loadPlans(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, progressFn)
 		return loadErr
 	})
 	runLoad("Loading target persons", "target_persons_load", SeverityError, func(progressFn func(current, total int)) error {
 		var loadErr error
-		targetPersons, loadErr = loadPersons(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie, "", progressFn)
+		targetPersons, loadErr = loadPersons(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "", progressFn)
 		return loadErr
 	})
 	runLoad("Loading target resources", "target_resources_load", SeverityWarning, func(progressFn func(current, total int)) error {
 		var loadErr error
-		targetResources, loadErr = loadResources(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie, "", progressFn)
+		targetResources, loadErr = loadResources(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "", progressFn)
 		return loadErr
 	})
 
@@ -1375,7 +1375,7 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 
 	progress.Start("Hydrating resource-linked persons")
 	if strings.TrimSpace(cfg.SourceBaseURL) != "" {
-		if sourceClient, err := newJiraClientWithCookie(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.SourceCookie); err == nil {
+		if sourceClient, err := newJiraClient(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword); err == nil {
 			sourcePersons, findings = hydrateResourceLinkedPersons(sourceClient, sourcePersons, sourceResources, "source", findings)
 		}
 	}
@@ -1383,7 +1383,7 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 
 	progress.Start("Resolving target Jira users")
 	if strings.TrimSpace(cfg.TargetBaseURL) != "" {
-		if targetClient, err := newJiraClientWithCookie(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie); err == nil {
+		if targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword); err == nil {
 			mapping, targetPersons, findings = resolveTargetUsersForResourcePersons(targetClient, mapping, sourcePersons, sourceResources, targetPersons, findings)
 		}
 	}
@@ -1499,7 +1499,7 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 			progress.End()
 
 			progress.Start("Resolving target Parent Link field")
-			if targetClient, err := newJiraClientWithCookie(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie); err != nil {
+			if targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword); err != nil {
 				findings = append(findings, newFinding(SeverityWarning, "target_parent_link_field_client", fmt.Sprintf("Could not create target Jira client for Parent Link field lookup: %v", err)))
 			} else if field, fieldPath, fieldFindings := resolveTargetParentLinkFieldForExport(cfg, targetClient); len(fieldFindings) > 0 {
 				findings = append(findings, fieldFindings...)
@@ -1553,7 +1553,7 @@ func sourceIssueClient(cfg Config) (*jiraClient, error) {
 	if strings.TrimSpace(cfg.SourceBaseURL) == "" {
 		return nil, nil
 	}
-	return newJiraClientWithCookie(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.SourceCookie)
+	return newJiraClient(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword)
 }
 
 func postMigrateCanUsePreparedArtifacts(cfg Config) bool {
@@ -1863,7 +1863,7 @@ func issueTeamCorrectionsInScope(cfg Config) bool {
 }
 
 func targetAuthDiagnosticFinding(cfg Config) *Finding {
-	client, err := newJiraClientWithCookie(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, cfg.TargetCookie)
+	client, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
 	if err != nil {
 		finding := newFinding(SeverityWarning, "target_auth_diagnostic_failed", fmt.Sprintf("Could not create target Jira client for auth diagnostic: %v", err))
 		return &finding
@@ -3448,55 +3448,55 @@ func mappedTargetTeamIDsForExport(raw string, targetTeamIDs map[string]string) [
 	return out
 }
 
-func loadTeams(baseURL, username, password, cookie, file string, progress func(current, total int)) ([]TeamDTO, error) {
+func loadTeams(baseURL, username, password, file string, progress func(current, total int)) ([]TeamDTO, error) {
 	if file != "" {
 		return loadJSONFile[TeamDTO](file)
 	}
-	client, err := newJiraClientWithCookie(baseURL, username, password, cookie)
+	client, err := newJiraClient(baseURL, username, password)
 	if err != nil {
 		return nil, err
 	}
 	return client.ListTeams(progress)
 }
 
-func loadPersons(baseURL, username, password, cookie, file string, progress func(current, total int)) ([]PersonDTO, error) {
+func loadPersons(baseURL, username, password, file string, progress func(current, total int)) ([]PersonDTO, error) {
 	if file != "" {
 		return loadJSONFile[PersonDTO](file)
 	}
-	client, err := newJiraClientWithCookie(baseURL, username, password, cookie)
+	client, err := newJiraClient(baseURL, username, password)
 	if err != nil {
 		return nil, err
 	}
 	return client.ListPersons(progress)
 }
 
-func loadResources(baseURL, username, password, cookie, file string, progress func(current, total int)) ([]ResourceDTO, error) {
+func loadResources(baseURL, username, password, file string, progress func(current, total int)) ([]ResourceDTO, error) {
 	if file != "" {
 		return loadJSONFile[ResourceDTO](file)
 	}
-	client, err := newJiraClientWithCookie(baseURL, username, password, cookie)
+	client, err := newJiraClient(baseURL, username, password)
 	if err != nil {
 		return nil, err
 	}
 	return client.ListResources(progress)
 }
 
-func loadPrograms(baseURL, username, password, cookie string, progress func(current, total int)) ([]ProgramDTO, error) {
+func loadPrograms(baseURL, username, password string, progress func(current, total int)) ([]ProgramDTO, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, nil
 	}
-	client, err := newJiraClientWithCookie(baseURL, username, password, cookie)
+	client, err := newJiraClient(baseURL, username, password)
 	if err != nil {
 		return nil, err
 	}
 	return client.ListPrograms(progress)
 }
 
-func loadPlans(baseURL, username, password, cookie string, progress func(current, total int)) ([]PlanDTO, error) {
+func loadPlans(baseURL, username, password string, progress func(current, total int)) ([]PlanDTO, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, nil
 	}
-	client, err := newJiraClientWithCookie(baseURL, username, password, cookie)
+	client, err := newJiraClient(baseURL, username, password)
 	if err != nil {
 		return nil, err
 	}

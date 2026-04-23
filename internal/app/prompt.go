@@ -61,7 +61,7 @@ func completeConfigInteractively(cfg *Config) error {
 	wizard.intro([]string{
 		"This tool helps migrate teams used by Jira Advanced Roadmaps (formerly Portfolio, now called Plans in Cloud) between Server/Data Center instances, prepares mapping artifacts, and can fix related Jira references after migration.",
 	})
-	if cfg.Profile != "" {
+	if cfg.ProfileLoaded {
 		wizard.note(fmt.Sprintf("Loaded defaults from saved profile %q.", cfg.Profile))
 	}
 
@@ -87,8 +87,8 @@ func completeConfigInteractively(cfg *Config) error {
 		value, err := wizard.choice(wizardField{
 			Label:        "Source data mode",
 			Description:  "Choose whether source teams/persons/resources should come from exported JSON files or directly from the source Jira API.",
-			ArtifactInfo: "File mode is easier for a first dry run. API mode is needed for live reads and issue-field discovery.",
-			Default:      "file",
+			ArtifactInfo: "API mode is the default and reads these datasets directly from Jira for a guided dry run. File mode is available when you already have teams, persons, and resources JSON exports.",
+			Default:      "api",
 		}, []string{"file", "api"})
 		if err != nil {
 			return err
@@ -191,12 +191,11 @@ func completeConfigInteractively(cfg *Config) error {
 	if cfg.Command == "migrate" && !cfg.PhaseExplicit {
 		value, err := wizard.choice(wizardField{
 			Label:       "Migration phase",
-			Description: "Choose the next phase to run. Pre-migrate gathers comparison data, migrate performs destination writes, and post-migrate handles Jira field rewrites after team IDs already exist in the destination.",
+			Description: "Choose the next phase to run.",
 			InputHelp:   "Type the number of your choice and press Enter.",
 			ArtifactInfo: strings.Join([]string{
 				"pre-migrate: fetch source/target data and generate comparison artifacts only.",
 				"migrate: create destination teams and memberships from the current mappings.",
-				"post-migrate: requires destination teams to already exist and rewrites issue/filter team IDs in the target Jira.",
 			}, " "),
 			Default: defaultMigrationPhase(cfg.Command),
 		}, availableMigrationPhases(*cfg))
@@ -245,9 +244,10 @@ func completeMigrateSessionInteractively(cfg *Config) error {
 
 	wizard := newWizard("Teams Migrator", "Guided migrate run")
 	introLines := []string{
-		"This tool walks through pre-migrate, migrate, and post-migrate without re-asking saved answers.",
+		"This tool walks through the migration in phases without re-asking saved answers.",
+		"Pre-migrate is read-only and writes review artifacts. Migrate previews and then creates safe destination teams and memberships after confirmation. Post-migrate is a later correction phase for Jira issue, Parent Link, and filter references after destination team IDs exist.",
 	}
-	if cfg.Profile != "" {
+	if cfg.ProfileLoaded {
 		introLines = append(introLines, fmt.Sprintf("Loaded defaults from saved profile %q.", cfg.Profile))
 	}
 	wizard.intro(introLines)
@@ -260,7 +260,6 @@ func completeMigrateSessionInteractively(cfg *Config) error {
 			ArtifactInfo: strings.Join([]string{
 				"pre-migrate: fetch source/target data and generate comparison artifacts only.",
 				"migrate: preview and then create destination teams.",
-				"post-migrate: preview and then apply Jira issue/filter corrections after destination teams already exist.",
 			}, " "),
 			Default: defaultMigrationPhase(cfg.Command),
 		}, availableMigrationPhases(*cfg))
@@ -293,8 +292,8 @@ func completeMigrateSessionInteractively(cfg *Config) error {
 		value, err := wizard.choice(wizardField{
 			Label:        "Source data mode",
 			Description:  "Choose whether source teams/persons/resources should come from exported JSON files or directly from the source Jira API.",
-			ArtifactInfo: "File mode is easier for a first dry run. API mode is needed for live reads and issue-field discovery.",
-			Default:      "file",
+			ArtifactInfo: "API mode is the default and reads these datasets directly from Jira for a guided dry run. File mode is available when you already have teams, persons, and resources JSON exports.",
+			Default:      "api",
 		}, []string{"file", "api"})
 		if err != nil {
 			return err
@@ -394,12 +393,6 @@ func completeMigrateSessionInteractively(cfg *Config) error {
 		}
 	}
 
-	if runsPostMigratePhase(cfg.Command, cfg.Phase) {
-		if err := configurePostMigrationCorrectionScopesForWizard(wizard, cfg); err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
 
@@ -455,7 +448,7 @@ func sourceNeedsAuth(cfg Config) bool {
 	if canUsePreparedSourceArtifacts(cfg) {
 		return false
 	}
-	return strings.TrimSpace(cfg.SourceBaseURL) != "" && strings.TrimSpace(cfg.SourceCookie) == "" && (strings.TrimSpace(cfg.SourceUsername) == "" || strings.TrimSpace(cfg.SourcePassword) == "")
+	return strings.TrimSpace(cfg.SourceBaseURL) != "" && (strings.TrimSpace(cfg.SourceUsername) == "" || strings.TrimSpace(cfg.SourcePassword) == "")
 }
 
 func canUsePreparedSourceArtifacts(cfg Config) bool {
@@ -463,7 +456,7 @@ func canUsePreparedSourceArtifacts(cfg Config) bool {
 }
 
 func targetNeedsAuth(cfg Config) bool {
-	return strings.TrimSpace(cfg.TargetBaseURL) != "" && strings.TrimSpace(cfg.TargetCookie) == "" && (strings.TrimSpace(cfg.TargetUsername) == "" || strings.TrimSpace(cfg.TargetPassword) == "")
+	return strings.TrimSpace(cfg.TargetBaseURL) != "" && (strings.TrimSpace(cfg.TargetUsername) == "" || strings.TrimSpace(cfg.TargetPassword) == "")
 }
 
 func runConfigInitWizard(cfg Config) error {
@@ -486,12 +479,7 @@ func runConfigInitWizard(cfg Config) error {
 	})
 	wizard.note(fmt.Sprintf("Config file: %s", cfg.ConfigPath))
 
-	profileName, err := wizard.value(wizardField{
-		Label:        "Profile name",
-		Description:  "Choose a short profile name for this environment or migration setup.",
-		ArtifactInfo: "Examples: default, prod, dc-migration-test",
-		Default:      defaultProfileName(store, cfg.Profile),
-	})
+	profileName, editingExisting, err := chooseInitProfile(wizard, store, &cfg)
 	if err != nil {
 		return err
 	}
@@ -514,7 +502,7 @@ func runConfigInitWizard(cfg Config) error {
 	sourceMode, err := wizard.choice(wizardField{
 		Label:        "Default source mode",
 		Description:  "Choose whether this profile should default to source JSON exports or direct source Jira API access.",
-		ArtifactInfo: "File mode is often easiest for repeatable planning. API mode is useful when you want live reads.",
+		ArtifactInfo: "File mode requires teams, persons, and resources JSON exports. API mode reads those datasets at runtime and supports issue-field discovery.",
 		Default:      inferSourceModeOrDefault(cfg),
 	}, []string{"file", "api"})
 	if err != nil {
@@ -618,26 +606,38 @@ func runConfigInitWizard(cfg Config) error {
 	}
 	cfg.TeamScope = teamScope
 
-	issueProjectScope, err := wizard.value(wizardField{
-		Label:        "Default issue correction project scope",
-		Description:  "Choose which Jira projects should be in scope for issue-based correction exports and post-migrate rewrites by default.",
-		InputHelp:    "Type all, or a comma-separated list like ABC,DEF.",
-		ArtifactInfo: "This scope applies to issue/team and Parent Link correction flows. Filters are not project-scoped.",
-		Default:      nonEmptyDefault(cfg.IssueProjectScope, "all"),
-	})
-	if err != nil {
-		return err
-	}
-	cfg.IssueProjectScope = issueProjectScope
+	cfg.IssueTeamIDsInScope = true
+	cfg.IssueTeamIDsInScopeSet = true
+	cfg.ParentLinkInScope = strings.TrimSpace(cfg.SourceBaseURL) != ""
+	cfg.ParentLinkInScopeSet = true
+	cfg.FilterTeamIDsInScope = filterReferenceExportsAvailable(cfg)
+	cfg.FilterTeamIDsInScopeSet = true
 
-	setCurrent, err := wizard.choice(wizardField{
-		Label:       "Set as current profile",
-		Description: "If set to yes, this profile becomes the default when you run teams-migrator without --profile.",
-		InputHelp:   "Type the number of your choice and press Enter.",
-		Default:     "yes",
-	}, []string{"yes", "no"})
-	if err != nil {
-		return err
+	if issueTeamCorrectionsInScope(cfg) || cfg.ParentLinkInScope {
+		issueProjectScope, err := wizard.value(wizardField{
+			Label:        "Default issue correction project scope",
+			Description:  "Choose which Jira projects should be in scope for issue-based correction exports and post-migrate rewrites by default.",
+			InputHelp:    "Type all, or a comma-separated list like ABC,DEF.",
+			ArtifactInfo: "This scope applies to issue/team and Parent Link correction flows. Filters are not project-scoped.",
+			Default:      nonEmptyDefault(cfg.IssueProjectScope, "all"),
+		})
+		if err != nil {
+			return err
+		}
+		cfg.IssueProjectScope = issueProjectScope
+	}
+
+	setCurrent := "yes"
+	if !editingExisting || store.CurrentProfile != profileName {
+		setCurrent, err = wizard.choice(wizardField{
+			Label:       "Set as current profile",
+			Description: "If set to yes, this profile becomes the default when you run teams-migrator without --profile.",
+			InputHelp:   "Type the number of your choice and press Enter.",
+			Default:     defaultYesNoForCurrentProfile(store, profileName),
+		}, []string{"yes", "no"})
+		if err != nil {
+			return err
+		}
 	}
 
 	store.Profiles[profileName] = savedProfileFromConfig(cfg, false)
@@ -674,7 +674,62 @@ func runConfigInitWizard(cfg Config) error {
 	return nil
 }
 
+func chooseInitProfile(wizard *wizardContext, store ProfileStore, cfg *Config) (string, bool, error) {
+	if strings.TrimSpace(cfg.Profile) != "" {
+		profileName := strings.TrimSpace(cfg.Profile)
+		if profile, ok := store.Profiles[profileName]; ok {
+			applySavedProfile(cfg, profile)
+			return profileName, true, nil
+		}
+		return profileName, false, nil
+	}
+
+	names := profileNames(store)
+	if len(names) == 0 {
+		profileName, err := wizard.value(wizardField{
+			Label:        "Profile name",
+			Description:  "Choose a short profile name for this environment or migration setup.",
+			ArtifactInfo: "Examples: default, prod, dc-migration-test",
+			Default:      defaultProfileName(store, cfg.Profile),
+		})
+		return profileName, false, err
+	}
+
+	action, err := wizard.choice(wizardField{
+		Label:       "Profile action",
+		Description: "Choose whether to edit an existing profile or create a new profile.",
+		InputHelp:   "Type the number of your choice and press Enter.",
+		Default:     "edit existing",
+	}, []string{"edit existing", "create new"})
+	if err != nil {
+		return "", false, err
+	}
+
+	if action == "edit existing" {
+		profileName, err := promptProfileSelection(store, names)
+		if err != nil {
+			return "", false, err
+		}
+		applySavedProfile(cfg, store.Profiles[profileName])
+		return profileName, true, nil
+	}
+
+	profileName, err := wizard.value(wizardField{
+		Label:        "New profile name",
+		Description:  "Choose a short profile name for this environment or migration setup.",
+		ArtifactInfo: "Examples: default, prod, dc-migration-test",
+		Default:      nextNewProfileName(store),
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return profileName, false, nil
+}
+
 func promptForAuth(wizard *wizardContext, label string, username, password *string) error {
+	if strings.TrimSpace(*username) != "" && strings.TrimSpace(*password) != "" {
+		return nil
+	}
 	if strings.TrimSpace(*username) == "" {
 		user, err := wizard.value(wizardField{
 			Label:       fmt.Sprintf("%s username", titleCase(label)),
@@ -761,6 +816,30 @@ func (w *wizardContext) choice(field wizardField, choices []string) (string, err
 		fmt.Fprintln(os.Stdout)
 		fmt.Fprintf(os.Stdout, "%s\n", theme.style(fmt.Sprintf("Invalid choice. Enter a number from 1 to %d.", len(choices)), theme.errorColor))
 	}
+}
+
+func promptProfileSelection(store ProfileStore, names []string) (string, error) {
+	wizard := newWizard("Teams Migrator", "Select profile")
+	defaultProfile := store.CurrentProfile
+	if defaultProfile == "" || !profileNameInList(defaultProfile, names) {
+		defaultProfile = names[0]
+	}
+	return wizard.choice(wizardField{
+		Label:        "Profile",
+		Description:  "Multiple saved profiles are available. Choose which migration profile to use for this run.",
+		InputHelp:    "Type the number of your choice and press Enter.",
+		ArtifactInfo: fmt.Sprintf("Current profile: %s", defaultProfile),
+		Default:      defaultProfile,
+	}, names)
+}
+
+func profileNameInList(name string, names []string) bool {
+	for _, candidate := range names {
+		if candidate == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *wizardContext) secret(field wizardField) (string, error) {
@@ -868,6 +947,25 @@ func defaultProfileName(store ProfileStore, current string) string {
 	return "default"
 }
 
+func defaultYesNoForCurrentProfile(store ProfileStore, profileName string) string {
+	if store.CurrentProfile == "" || store.CurrentProfile == profileName {
+		return "yes"
+	}
+	return "no"
+}
+
+func nextNewProfileName(store ProfileStore) string {
+	if _, ok := store.Profiles["default"]; !ok {
+		return "default"
+	}
+	for i := 2; ; i++ {
+		name := fmt.Sprintf("profile-%d", i)
+		if _, ok := store.Profiles[name]; !ok {
+			return name
+		}
+	}
+}
+
 func nonEmptyDefault(value, fallback string) string {
 	if value != "" {
 		return value
@@ -897,13 +995,14 @@ func defaultFilterTeamDataSource(cfg Config) string {
 
 func configurePostMigrationCorrectionScopes(wizard *wizardContext, cfg *Config) error {
 	choice, err := wizard.choice(wizardField{
-		Label:       "Post-migrate correction types",
-		Description: "Choose which Jira correction families should be prepared and applied by pre-/post-migrate.",
+		Label:       "Jira reference exports",
+		Description: "Choose which optional Jira reference artifacts pre-migrate should prepare for later correction runs.",
 		InputHelp:   "Type the number of your choice and press Enter.",
 		ArtifactInfo: strings.Join([]string{
+			"These exports do not update Jira during pre-migrate.",
 			"all three: issue Team-field IDs, Parent Link references, and filter JQL team IDs.",
 			"Individual choices are useful for focused testing.",
-			"skip: do not prepare Jira issue/filter correction artifacts.",
+			"skip: migrate teams and memberships only.",
 		}, " "),
 		Default: "skip",
 	}, []string{"all three", "issue/team only", "parent link only", "filter only", "skip"})
@@ -1029,7 +1128,7 @@ func configureFilterTeamIDSource(wizard *wizardContext, cfg *Config) error {
 		Label:        "Custom filter endpoint installed",
 		Description:  "Choose whether the custom ScriptRunner endpoint for team-ID filter discovery is already installed on the source Jira instance.",
 		InputHelp:    "Type the number of your choice and press Enter.",
-		ArtifactInfo: "The expected endpoint path is /rest/scriptrunner/latest/custom/findTeamFiltersDB and it requires the resolved Jira Teams custom field ID.",
+		ArtifactInfo: "The expected endpoint path is /rest/scriptrunner/latest/custom/findSourceTeamFiltersDB and it requires the resolved Jira Teams custom field ID.",
 		Default:      defaultYesNoChoice(cfg.FilterDataSource == filterDataSourceScriptRunner, cfg.FilterScriptRunnerInstalled, "yes"),
 	}, []string{"yes", "no"})
 	if err != nil {
@@ -1157,21 +1256,41 @@ func promptSecretValue(label, description string) (string, error) {
 	return readSecretLine()
 }
 
-func confirmApplyAfterPreview() (bool, error) {
+type applyPreviewChoice string
+
+const (
+	applyPreviewStop  applyPreviewChoice = "stop"
+	applyPreviewAgain applyPreviewChoice = "preview again"
+	applyPreviewApply applyPreviewChoice = "apply now"
+)
+
+func promptApplyAfterPreview() (applyPreviewChoice, error) {
 	if !isInteractiveTerminal() {
-		return true, nil
+		return applyPreviewApply, nil
 	}
 	reader := bufio.NewReader(os.Stdin)
-	renderWizardSection("Teams Migrator | Apply", "Apply mode confirmation", []string{
+	renderWizardSection("Teams Migrator | Apply", "Choose next step", []string{
 		"You have just seen the preview for the planned mappings and writes.",
-		"Apply mode will now create records on the target Jira instance where the plan marked them as add or created.",
+		"Stopping here keeps this run in dry-run mode. Applying creates records on the target Jira instance where the plan marked them as add or created.",
 		"Non-shared teams cannot be created by this tool and must already exist in the destination plan before migration.",
-	}, "Type APPLY exactly to continue, or press Ctrl+C to cancel.", "", "", "Enter APPLY to continue. Ctrl+C cancels.")
-	value, err := readLine(reader, "")
+		"",
+		"Choices:",
+		"1. stop",
+		"2. preview again",
+		"3. apply now",
+	}, "Type the number of your choice and press Enter.", "", "", "Press Enter to stop. Ctrl+C cancels.")
+	value, err := readLine(reader, string(applyPreviewStop))
 	if err != nil {
-		return false, err
+		return applyPreviewStop, err
 	}
-	return strings.TrimSpace(value) == "APPLY", nil
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "3", string(applyPreviewApply), "apply":
+		return applyPreviewApply, nil
+	case "2", string(applyPreviewAgain), "preview":
+		return applyPreviewAgain, nil
+	default:
+		return applyPreviewStop, nil
+	}
 }
 
 func promptProceedToPostMigrationCorrections() (bool, error) {
@@ -1179,16 +1298,21 @@ func promptProceedToPostMigrationCorrections() (bool, error) {
 		return false, nil
 	}
 	reader := bufio.NewReader(os.Stdin)
-	renderWizardSection("Teams Migrator | Post-migrate", "Proceed to post-migration corrections?", []string{
-		"The migrate phase summary above shows the final destination team IDs and prepared correction inputs.",
-		"Continue now to review the prepared post-migration correction files, or stop here and run post-migrate later.",
-	}, "Type yes to continue now, or press Enter to do this later and close the tool.", "", "", "Default: later. Ctrl+C cancels.")
-	value, err := readLine(reader, "no")
+	renderWizardSection("Teams Migrator | Next phase", "Start post-migrate now?", []string{
+		"The migrate phase is complete. Destination team IDs and correction inputs are ready.",
+		"Post-migrate is a separate phase that updates Jira issue, Parent Link, and filter references where prepared mappings are still valid.",
+		"You can stop here and run it later with: teams-migrator migrate --phase post-migrate",
+		"",
+		"Choices:",
+		"1. yes",
+		"2. stop",
+	}, "Type the number of your choice and press Enter.", "", "", "Press Enter to stop after migrate. Ctrl+C cancels.")
+	value, err := readLine(reader, "2")
 	if err != nil {
 		return false, err
 	}
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "y", "yes":
+	case "1", "y", "yes":
 		return true, nil
 	default:
 		return false, nil
@@ -1210,13 +1334,17 @@ func promptContinueToMigrationPhase(nextPhase string) (bool, error) {
 	renderWizardSection("Teams Migrator | Continue", fmt.Sprintf("Continue to %s now?", titleCase(nextLabel)), []string{
 		fmt.Sprintf("The current phase completed successfully."),
 		fmt.Sprintf("Continue now to the %s phase using the same in-memory credentials and saved scope, or stop here and resume later.", nextLabel),
-	}, "Type yes to continue now, or press Enter to stop here.", "", "", "Default: stop here. Ctrl+C cancels.")
-	value, err := readLine(reader, "no")
+		"",
+		"Choices:",
+		"1. yes",
+		"2. stop",
+	}, "Type the number of your choice and press Enter.", "", "", "Press Enter to stop here. Ctrl+C cancels.")
+	value, err := readLine(reader, "2")
 	if err != nil {
 		return false, err
 	}
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "y", "yes":
+	case "1", "y", "yes":
 		return true, nil
 	default:
 		return false, nil

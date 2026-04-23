@@ -105,6 +105,7 @@ func newReport(cfg Config) Report {
 			FilterSourceCSV:      cfg.FilterSourceCSV,
 			TeamScope:            cfg.TeamScope,
 			IssueProjectScope:    cfg.IssueProjectScope,
+			IssueTeamIDsInScope:  cfg.IssueTeamIDsInScope,
 			FilterTeamIDsInScope: cfg.FilterTeamIDsInScope,
 			ParentLinkInScope:    cfg.ParentLinkInScope,
 			FilterDataSource:     cfg.FilterDataSource,

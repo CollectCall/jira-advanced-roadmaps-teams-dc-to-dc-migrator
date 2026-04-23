@@ -65,6 +65,8 @@ func profileToMap(profile SavedProfile) map[string]any {
 		"output_dir":                    profile.OutputDir,
 		"team_scope":                    profile.TeamScope,
 		"issue_project_scope":           profile.IssueProjectScope,
+		"issue_team_ids_in_scope":       profile.IssueTeamIDsInScope,
+		"issue_team_ids_in_scope_set":   profile.IssueTeamIDsInScopeSet,
 		"filter_team_ids_in_scope":      profile.FilterTeamIDsInScope,
 		"filter_team_ids_in_scope_set":  profile.FilterTeamIDsInScopeSet,
 		"parent_link_in_scope":          profile.ParentLinkInScope,

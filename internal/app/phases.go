@@ -10,7 +10,7 @@ const (
 
 func defaultMigrationPhase(command string) string {
 	if command == "migrate" {
-		return phaseMigrate
+		return phasePreMigrate
 	}
 	return ""
 }

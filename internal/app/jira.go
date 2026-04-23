@@ -21,10 +21,10 @@ const (
 	jiraMaxRetryAttempts                     = 5
 	jiraInitialRetryDelay                    = 500 * time.Millisecond
 	jiraMaxRetryDelay                        = 10 * time.Second
-	teamFilterScriptRunnerEndpointPath       = "/rest/scriptrunner/latest/custom/findTeamFiltersDB"
+	teamFilterScriptRunnerEndpointPath       = "/rest/scriptrunner/latest/custom/findSourceTeamFiltersDB"
 	teamFilterScriptRunnerScriptPath         = "scripts/sourceFindTeamFiltersDB.groovy"
 	targetTeamFilterScriptRunnerEndpointPath = "/rest/scriptrunner/latest/custom/findTargetTeamFiltersDB"
-	targetTeamFilterScriptRunnerScriptPath   = "scripts/targetFindTargetTeamFiltersDB.groovy"
+	targetTeamFilterScriptRunnerScriptPath   = "scripts/targetFindTeamFiltersDB.groovy"
 )
 
 type jiraClient struct {
@@ -32,7 +32,6 @@ type jiraClient struct {
 	baseURL         string
 	username        string
 	password        string
-	cookie          string
 	httpClient      *http.Client
 }
 
@@ -66,10 +65,6 @@ func (e *jiraAPIError) Error() string {
 }
 
 func newJiraClient(baseURL, username, password string) (*jiraClient, error) {
-	return newJiraClientWithCookie(baseURL, username, password, "")
-}
-
-func newJiraClientWithCookie(baseURL, username, password, cookie string) (*jiraClient, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, fmt.Errorf("jira base URL is required")
 	}
@@ -78,7 +73,6 @@ func newJiraClientWithCookie(baseURL, username, password, cookie string) (*jiraC
 		baseURL:         normalizeAPIBaseURL(baseURL),
 		username:        username,
 		password:        password,
-		cookie:          cookie,
 		httpClient:      &http.Client{Timeout: 30 * time.Second},
 	}, nil
 }
@@ -580,9 +574,6 @@ func (c *jiraClient) doJSONAgainstBase(base, method, endpoint string, query url.
 		}
 		if c.username != "" || c.password != "" {
 			req.SetBasicAuth(c.username, c.password)
-		}
-		if strings.TrimSpace(c.cookie) != "" {
-			req.Header.Set("Cookie", c.cookie)
 		}
 
 		resp, err := c.httpClient.Do(req)

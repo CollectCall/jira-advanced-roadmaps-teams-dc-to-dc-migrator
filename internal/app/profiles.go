@@ -33,6 +33,8 @@ type SavedProfile struct {
 	OutputDir                   string
 	TeamScope                   string
 	IssueProjectScope           string
+	IssueTeamIDsInScope         bool
+	IssueTeamIDsInScopeSet      bool
 	FilterTeamIDsInScope        bool
 	FilterTeamIDsInScopeSet     bool
 	ParentLinkInScope           bool
@@ -170,6 +172,10 @@ func applySavedProfile(cfg *Config, profile SavedProfile) {
 	if cfg.IssueProjectScope == "" {
 		cfg.IssueProjectScope = profile.IssueProjectScope
 	}
+	if !cfg.IssueTeamIDsInScopeSet {
+		cfg.IssueTeamIDsInScope = profile.IssueTeamIDsInScope
+		cfg.IssueTeamIDsInScopeSet = profile.IssueTeamIDsInScopeSet
+	}
 	if !cfg.FilterTeamIDsInScopeSet {
 		cfg.FilterTeamIDsInScope = profile.FilterTeamIDsInScope
 		cfg.FilterTeamIDsInScopeSet = profile.FilterTeamIDsInScopeSet
@@ -187,20 +193,30 @@ func applySavedProfile(cfg *Config, profile SavedProfile) {
 	}
 }
 
-func resolveProfile(cfg Config, store ProfileStore) SavedProfile {
+func profileNames(store ProfileStore) []string {
+	names := make([]string, 0, len(store.Profiles))
+	for name := range store.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func resolveProfile(cfg Config, store ProfileStore) (string, SavedProfile, bool) {
 	name := cfg.Profile
 	if name == "" {
 		if store.CurrentProfile != "" {
 			name = store.CurrentProfile
-		} else {
-			name = "default"
 		}
+	}
+	if name == "" {
+		return "", SavedProfile{}, false
 	}
 	profile, ok := store.Profiles[name]
 	if !ok {
-		return SavedProfile{}
+		return name, SavedProfile{}, false
 	}
-	return profile
+	return name, profile, true
 }
 
 func savedProfileFromConfig(cfg Config, includeSecrets bool) SavedProfile {
@@ -217,6 +233,8 @@ func savedProfileFromConfig(cfg Config, includeSecrets bool) SavedProfile {
 		OutputDir:                   cfg.OutputDir,
 		TeamScope:                   cfg.TeamScope,
 		IssueProjectScope:           cfg.IssueProjectScope,
+		IssueTeamIDsInScope:         cfg.IssueTeamIDsInScope,
+		IssueTeamIDsInScopeSet:      cfg.IssueTeamIDsInScopeSet,
 		FilterTeamIDsInScope:        cfg.FilterTeamIDsInScope,
 		FilterTeamIDsInScopeSet:     cfg.FilterTeamIDsInScopeSet,
 		ParentLinkInScope:           cfg.ParentLinkInScope,
@@ -248,6 +266,8 @@ func profileEntries(profile SavedProfile) []profileEntry {
 		{key: "output_dir", value: profile.OutputDir},
 		{key: "team_scope", value: profile.TeamScope},
 		{key: "issue_project_scope", value: profile.IssueProjectScope},
+		{key: "issue_team_ids_in_scope", value: formatBool(profile.IssueTeamIDsInScope)},
+		{key: "issue_team_ids_in_scope_set", value: formatBool(profile.IssueTeamIDsInScopeSet)},
 		{key: "filter_team_ids_in_scope", value: formatBool(profile.FilterTeamIDsInScope)},
 		{key: "filter_team_ids_in_scope_set", value: formatBool(profile.FilterTeamIDsInScopeSet)},
 		{key: "parent_link_in_scope", value: formatBool(profile.ParentLinkInScope)},
@@ -285,6 +305,10 @@ func assignProfileField(profile *SavedProfile, key, value string) {
 		profile.TeamScope = value
 	case "issue_project_scope":
 		profile.IssueProjectScope = value
+	case "issue_team_ids_in_scope":
+		profile.IssueTeamIDsInScope = parseBoolScalar(value)
+	case "issue_team_ids_in_scope_set":
+		profile.IssueTeamIDsInScopeSet = parseBoolScalar(value)
 	case "filter_team_ids_in_scope":
 		profile.FilterTeamIDsInScope = parseBoolScalar(value)
 	case "filter_team_ids_in_scope_set":

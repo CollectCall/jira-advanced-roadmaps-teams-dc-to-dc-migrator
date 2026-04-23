@@ -22,7 +22,7 @@ func TestVerifyTeamFilterScriptRunnerEndpointWithClientUsesResolvedFieldID(t *te
 					Body:       io.NopCloser(strings.NewReader(`[{"id":"customfield_16604","name":"Team","custom":true,"schema":{"custom":"com.atlassian.rm:team","type":"array"}}]`)),
 					Header:     make(http.Header),
 				}, nil
-			case "/jira/rest/scriptrunner/latest/custom/findTeamFiltersDB":
+			case "/jira/rest/scriptrunner/latest/custom/findSourceTeamFiltersDB":
 				if got := req.URL.Query().Get("enabled"); got != "true" {
 					t.Fatalf("expected enabled=true, got %q", got)
 				}
@@ -57,7 +57,7 @@ func TestVerifyTeamFilterScriptRunnerEndpointWithClientUsesResolvedFieldID(t *te
 	if fieldLabel != "Team (16604)" {
 		t.Fatalf("expected resolved field label Team (16604), got %q", fieldLabel)
 	}
-	wantURL := "https://example.test/jira/rest/scriptrunner/latest/custom/findTeamFiltersDB?enabled=true&lastId=0&limit=500&teamFieldId=16604"
+	wantURL := "https://example.test/jira/rest/scriptrunner/latest/custom/findSourceTeamFiltersDB?enabled=true&lastId=0&limit=500&teamFieldId=16604"
 	if endpointURL != wantURL {
 		t.Fatalf("expected endpoint URL %q, got %q", wantURL, endpointURL)
 	}

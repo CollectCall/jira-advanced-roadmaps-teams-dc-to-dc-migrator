@@ -93,41 +93,6 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
     long lastScannedId = lastId
 
     // =========================
-    // CLAUSE DETECTOR (STRICT)
-    // =========================
-    def hasTeamIdClause
-    hasTeamIdClause = { Clause clause ->
-
-        if (!clause) return false
-
-        if (clause instanceof TerminalClause) {
-            def field = (clause.name ?: "").replaceAll('"', '').toLowerCase()
-            def operator = clause.operator?.toString()
-
-            boolean fieldMatch =
-                    (field == "team") ||
-                    (field == "teams") ||
-                    (field ==~ /cf\[[0-9]+\]/) ||
-                    (teamFieldId && field == "cf[${teamFieldId}]")
-
-            boolean operatorMatch =
-                    (operator == "EQUALS" || operator == "IN")
-
-            return fieldMatch && operatorMatch && clauseHasNumericTeamOperand(clause.toString())
-        }
-
-        if (clause instanceof AndClause || clause instanceof OrClause) {
-            return clause.clauses.any { hasTeamIdClause(it) }
-        }
-
-        if (clause instanceof NotClause) {
-            return notClauseChildren(clause).any { hasTeamIdClause(it) }
-        }
-
-        return false
-    }
-
-    // =========================
     // DB ACCESS (SQL + FALLBACK)
     // =========================
     boolean usedFallback = false
@@ -189,23 +154,16 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
                 if (!jql) return
                 if (!jqlMayContainTeamClause(jql)) return
 
-                try {
-                    jqlParser.parseQuery(jql)
+                if (!targetJqlHasNumericTeamClause(jqlParser, jql, teamFieldId)) return
 
-                    if (!jqlHasNumericTeamClause(jql, teamFieldId)) return
+                matched++
 
-                    matched++
-
-                    results << [
-                        id   : id,
-                        name : name,
-                        owner: author,
-                        jql  : jql
-                    ]
-
-                } catch (Exception e) {
-                    parseErrors << [id: id, name: name, error: e.message]
-                }
+                results << [
+                    id   : id,
+                    name : name,
+                    owner: author,
+                    jql  : jql
+                ]
             }
         }
 
@@ -244,23 +202,16 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
             if (!jql) continue
             if (!jqlMayContainTeamClause(jql)) continue
 
-            try {
-                jqlParser.parseQuery(jql)
+            if (!targetJqlHasNumericTeamClause(jqlParser, jql, teamFieldId)) continue
 
-                if (!jqlHasNumericTeamClause(jql, teamFieldId)) continue
+            matched++
 
-                matched++
-
-                results << [
-                    id   : id,
-                    name : name,
-                    owner: author,
-                    jql  : jql
-                ]
-
-            } catch (Exception e) {
-                parseErrors << [id: id, name: name, error: e.message]
-            }
+            results << [
+                id   : id,
+                name : name,
+                owner: author,
+                jql  : jql
+            ]
         }
     }
 
@@ -323,6 +274,55 @@ boolean jqlHasNumericTeamClause(String jql, String teamFieldId) {
         if (values && values.every { it.replaceAll(/^["']|["']$/, "").isLong() }) {
             return true
         }
+    }
+
+    return false
+}
+
+boolean targetJqlHasNumericTeamClause(def jqlParser, String jql, String teamFieldId) {
+    if (!jql) return false
+
+    boolean regexMatch = jqlHasNumericTeamClause(jql, teamFieldId)
+    if (!regexMatch) return false
+
+    try {
+        def parsed = jqlParser.parseQuery(jql)
+        if (hasTeamIdClause(parsed?.whereClause, teamFieldId)) return true
+    } catch (Exception e) {
+        // Some Jira versions reject saved filters that still contain Team ID clauses
+        // the migrator can rewrite safely, including quoted numeric IDs.
+        return true
+    }
+
+    return regexMatch
+}
+
+boolean hasTeamIdClause(Clause clause, String teamFieldId) {
+
+    if (!clause) return false
+
+    if (clause instanceof TerminalClause) {
+        def field = (clause.name ?: "").replaceAll('"', '').toLowerCase()
+        def operator = clause.operator?.toString()
+
+        boolean fieldMatch =
+                (field == "team") ||
+                (field == "teams") ||
+                (field ==~ /cf\[[0-9]+\]/) ||
+                (teamFieldId && field == "cf[${teamFieldId}]")
+
+        boolean operatorMatch =
+                (operator == "EQUALS" || operator == "IN")
+
+        return fieldMatch && operatorMatch && clauseHasNumericTeamOperand(clause.toString())
+    }
+
+    if (clause instanceof AndClause || clause instanceof OrClause) {
+        return clause.clauses.any { hasTeamIdClause(it, teamFieldId) }
+    }
+
+    if (clause instanceof NotClause) {
+        return notClauseChildren(clause).any { hasTeamIdClause(it, teamFieldId) }
     }
 
     return false

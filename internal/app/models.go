@@ -202,6 +202,13 @@ type ParentLinkRow struct {
 	SourceParentProjectKey string `json:"sourceParentProjectKey,omitempty"`
 }
 
+type ParentLinkFieldRow struct {
+	FieldID      string `json:"fieldId"`
+	FieldName    string `json:"fieldName"`
+	SchemaCustom string `json:"schemaCustom,omitempty"`
+	SchemaType   string `json:"schemaType,omitempty"`
+}
+
 type FilterTeamClauseRow struct {
 	FilterID       string `json:"filterId"`
 	FilterName     string `json:"filterName"`

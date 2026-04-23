@@ -15,11 +15,9 @@ const (
 	envSourceBaseURL     = "TEAMS_MIGRATOR_SOURCE_BASE_URL"
 	envSourceUsername    = "TEAMS_MIGRATOR_SOURCE_USERNAME"
 	envSourcePassword    = "TEAMS_MIGRATOR_SOURCE_PASSWORD"
-	envSourceCookie      = "TEAMS_MIGRATOR_SOURCE_COOKIE"
 	envTargetBaseURL     = "TEAMS_MIGRATOR_TARGET_BASE_URL"
 	envTargetUsername    = "TEAMS_MIGRATOR_TARGET_USERNAME"
 	envTargetPassword    = "TEAMS_MIGRATOR_TARGET_PASSWORD"
-	envTargetCookie      = "TEAMS_MIGRATOR_TARGET_COOKIE"
 	envIdentityMapping   = "TEAMS_MIGRATOR_IDENTITY_MAPPING_FILE"
 	envTeamsFile         = "TEAMS_MIGRATOR_TEAMS_FILE"
 	envPersonsFile       = "TEAMS_MIGRATOR_PERSONS_FILE"
@@ -43,14 +41,13 @@ const (
 
 type Config struct {
 	Command                     string
+	Help                        bool
 	SourceBaseURL               string
 	SourceUsername              string
 	SourcePassword              string
-	SourceCookie                string
 	TargetBaseURL               string
 	TargetUsername              string
 	TargetPassword              string
-	TargetCookie                string
 	IdentityMappingFile         string
 	IdentityMappingSet          bool
 	TeamsFile                   string
@@ -78,6 +75,8 @@ type Config struct {
 	NoInput                     bool
 	ConfigPath                  string
 	Profile                     string
+	ProfileExplicit             bool
+	ProfileLoaded               bool
 	OutputTimestamp             string
 	Phase                       string
 	PhaseExplicit               bool
@@ -93,14 +92,16 @@ func parseConfig(args []string) (Config, error) {
 	fs.SetOutput(os.Stderr)
 
 	cfg := Config{Command: command}
+	if command == "help" || hasHelpArg(remaining) {
+		cfg.Help = true
+		return cfg, nil
+	}
 	fs.StringVar(&cfg.SourceBaseURL, "source-base-url", envValue(envSourceBaseURL), "Source Jira base URL")
 	fs.StringVar(&cfg.SourceUsername, "source-username", envValue(envSourceUsername), "Source Jira username for basic auth")
 	fs.StringVar(&cfg.SourcePassword, "source-password", envValue(envSourcePassword), "Source Jira password for basic auth")
-	fs.StringVar(&cfg.SourceCookie, "source-cookie", envValue(envSourceCookie), "Source Jira Cookie header value for session-authenticated instances")
 	fs.StringVar(&cfg.TargetBaseURL, "target-base-url", envValue(envTargetBaseURL), "Target Jira base URL")
 	fs.StringVar(&cfg.TargetUsername, "target-username", envValue(envTargetUsername), "Target Jira username for basic auth")
 	fs.StringVar(&cfg.TargetPassword, "target-password", envValue(envTargetPassword), "Target Jira password for basic auth")
-	fs.StringVar(&cfg.TargetCookie, "target-cookie", envValue(envTargetCookie), "Target Jira Cookie header value for session-authenticated instances")
 	fs.StringVar(&cfg.IdentityMappingFile, "identity-mapping", envValue(envIdentityMapping), "Path to identity mapping CSV")
 	fs.StringVar(&cfg.TeamsFile, "teams-file", envValue(envTeamsFile), "Path to source teams JSON export")
 	fs.StringVar(&cfg.PersonsFile, "persons-file", envValue(envPersonsFile), "Path to source persons JSON export")
@@ -120,6 +121,7 @@ func parseConfig(args []string) (Config, error) {
 		reportFormat = envValue(envReportFormat)
 	}
 	reportFormatFlagProvided := stringFlagProvided(remaining, "--format")
+	profileExplicit := envIsSet(envProfile) || stringFlagProvided(remaining, "--profile")
 	fs.StringVar(&reportFormat, "format", reportFormat, "Report format: json or csv")
 
 	cfg.Strict = boolEnv(envStrict, false)
@@ -160,23 +162,26 @@ func parseConfig(args []string) (Config, error) {
 	if strings.TrimSpace(cfg.IdentityMappingFile) != "" {
 		cfg.IdentityMappingSet = true
 	}
+	cfg.ProfileExplicit = profileExplicit
 
-	if cfg.Command != "version" && cfg.Command != "self-update" && cfg.Command != "uninstall" {
+	if cfg.Command != "init" && cfg.Command != "config show" && cfg.Command != "version" && cfg.Command != "self-update" && cfg.Command != "uninstall" {
 		store, err := loadProfileStore(cfg.ConfigPath)
 		if err != nil {
 			return Config{}, fmt.Errorf("loading config store: %w", err)
 		}
-		applySavedProfile(&cfg, resolveProfile(cfg, store))
-
-		selectedProfile := cfg.Profile
-		if selectedProfile == "" {
-			if store.CurrentProfile != "" {
-				selectedProfile = store.CurrentProfile
-			} else {
-				selectedProfile = "default"
+		if profileExplicit || cfg.Command != "migrate" || cfg.NoInput || !isInteractiveTerminal() {
+			selectedProfile, profile, loaded := resolveProfile(cfg, store)
+			if profileExplicit && !loaded {
+				return Config{}, fmt.Errorf("saved profile %q was not found in %s; run teams-migrator init to create it or choose an existing profile", cfg.Profile, cfg.ConfigPath)
+			}
+			if selectedProfile != "" {
+				cfg.Profile = selectedProfile
+			}
+			if loaded {
+				applySavedProfile(&cfg, profile)
+				cfg.ProfileLoaded = true
 			}
 		}
-		cfg.Profile = selectedProfile
 	}
 
 	if strings.TrimSpace(cfg.TeamScope) == "" {
@@ -192,6 +197,7 @@ func parseConfig(args []string) (Config, error) {
 	} else {
 		cfg.FilterDataSource = strings.ToLower(strings.TrimSpace(cfg.FilterDataSource))
 	}
+	applyDefaultReferenceExportScopes(&cfg)
 
 	if cfg.Command != "init" && cfg.Command != "config show" && cfg.Command != "version" && cfg.Command != "self-update" && cfg.Command != "uninstall" && !cfg.NoInput {
 		if cfg.Command == "migrate" && isInteractiveTerminal() {
@@ -211,9 +217,49 @@ func parseConfig(args []string) (Config, error) {
 	return cfg, nil
 }
 
+func applyDefaultReferenceExportScopes(cfg *Config) {
+	if cfg.Command != "migrate" {
+		return
+	}
+
+	cfg.IssueTeamIDsInScope = true
+	cfg.IssueTeamIDsInScopeSet = true
+
+	cfg.ParentLinkInScope = strings.TrimSpace(cfg.SourceBaseURL) != "" || outputFamilyExists(cfg.OutputDir, "issues-with-parent-link.pre-migration.csv")
+	cfg.ParentLinkInScopeSet = true
+
+	if normalizeFilterDataSource(cfg.FilterDataSource) == "" && strings.TrimSpace(cfg.FilterSourceCSV) != "" {
+		cfg.FilterDataSource = filterDataSourceDatabaseCSV
+	}
+	cfg.FilterTeamIDsInScope = filterReferenceExportsAvailable(*cfg)
+	cfg.FilterTeamIDsInScopeSet = true
+}
+
+func filterReferenceExportsAvailable(cfg Config) bool {
+	if outputFamilyExists(cfg.OutputDir, "filters-with-team-clauses.pre-migration.csv") {
+		return true
+	}
+	switch normalizeFilterDataSource(cfg.FilterDataSource) {
+	case filterDataSourceDatabaseCSV:
+		return strings.TrimSpace(cfg.FilterSourceCSV) != ""
+	case filterDataSourceScriptRunner:
+		return cfg.FilterScriptRunnerInstalled && strings.TrimSpace(cfg.SourceBaseURL) != ""
+	default:
+		return false
+	}
+}
+
+func outputFamilyExists(outputDir, suffix string) bool {
+	_, ok := latestOutputFamilyPath(outputDir, suffix)
+	return ok
+}
+
 func parseCommand(args []string) (string, []string, error) {
 	if len(args) == 0 {
 		return "", nil, errUsage
+	}
+	if args[0] == "help" || isHelpArg(args[0]) {
+		return "help", nil, nil
 	}
 	if args[0] == "init" {
 		return "init", args[1:], nil
@@ -221,6 +267,9 @@ func parseCommand(args []string) (string, []string, error) {
 	if args[0] == "config" {
 		if len(args) < 2 {
 			return "", nil, errUsage
+		}
+		if isHelpArg(args[1]) {
+			return "help", nil, nil
 		}
 		if args[1] != "show" {
 			return "", nil, fmt.Errorf("unknown config subcommand %q", args[1])
@@ -288,8 +337,8 @@ func (c Config) requireCoreInputs() []Finding {
 	}
 	if c.TargetBaseURL == "" {
 		findings = append(findings, newFinding(SeverityWarning, "missing_target_base_url", "Target Jira base URL was not provided"))
-	} else if strings.TrimSpace(c.TargetCookie) == "" && (strings.TrimSpace(c.TargetUsername) == "" || strings.TrimSpace(c.TargetPassword) == "") {
-		findings = append(findings, newFinding(SeverityError, "missing_target_credentials", "Target Jira credentials were not provided; set --target-username/--target-password, TEAMS_MIGRATOR_TARGET_USERNAME/TEAMS_MIGRATOR_TARGET_PASSWORD, --target-cookie, or TEAMS_MIGRATOR_TARGET_COOKIE"))
+	} else if strings.TrimSpace(c.TargetUsername) == "" || strings.TrimSpace(c.TargetPassword) == "" {
+		findings = append(findings, newFinding(SeverityError, "missing_target_credentials", "Target Jira credentials were not provided; set --target-username/--target-password or TEAMS_MIGRATOR_TARGET_USERNAME/TEAMS_MIGRATOR_TARGET_PASSWORD"))
 	}
 	findings = append(findings, validateMigrationPhaseInputs(c)...)
 
@@ -463,6 +512,24 @@ func stringFlagProvided(args []string, name string) bool {
 		}
 	}
 	return false
+}
+
+func hasHelpArg(args []string) bool {
+	for _, arg := range args {
+		if isHelpArg(arg) {
+			return true
+		}
+	}
+	return false
+}
+
+func isHelpArg(arg string) bool {
+	switch strings.TrimSpace(arg) {
+	case "-h", "--help":
+		return true
+	default:
+		return false
+	}
 }
 
 func ensureOutputDir(path string) error {

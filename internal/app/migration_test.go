@@ -95,8 +95,28 @@ func TestParseConfigDefaultsMigratePhase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseConfig returned error: %v", err)
 	}
-	if cfg.Phase != phaseMigrate {
-		t.Fatalf("expected default migrate phase %q, got %q", phaseMigrate, cfg.Phase)
+	if cfg.Phase != phasePreMigrate {
+		t.Fatalf("expected default migrate phase %q, got %q", phasePreMigrate, cfg.Phase)
+	}
+}
+
+func TestParseConfigAcceptsHelpForms(t *testing.T) {
+	for _, args := range [][]string{
+		{"--help"},
+		{"-h"},
+		{"help"},
+		{"migrate", "--help"},
+		{"init", "-h"},
+		{"config", "--help"},
+		{"config", "show", "--help"},
+	} {
+		cfg, err := parseConfig(args)
+		if err != nil {
+			t.Fatalf("parseConfig(%v) returned error: %v", args, err)
+		}
+		if !cfg.Help {
+			t.Fatalf("parseConfig(%v) did not mark help", args)
+		}
 	}
 }
 
@@ -352,6 +372,65 @@ func TestParseConfigLoadsSkippedIdentityMappingDecisionFromLegacyProfileStore(t 
 	}
 }
 
+func TestResolveProfileDoesNotInventDefaultWhenStoreIsEmpty(t *testing.T) {
+	name, _, loaded := resolveProfile(Config{}, ProfileStore{Profiles: map[string]SavedProfile{}})
+	if loaded {
+		t.Fatal("expected no profile to load")
+	}
+	if name != "" {
+		t.Fatalf("expected no selected profile name, got %q", name)
+	}
+}
+
+func TestResolveProfileReportsMissingExplicitProfile(t *testing.T) {
+	name, _, loaded := resolveProfile(Config{Profile: "missing"}, ProfileStore{Profiles: map[string]SavedProfile{
+		"default": {},
+	}})
+	if loaded {
+		t.Fatal("expected missing profile not to load")
+	}
+	if name != "missing" {
+		t.Fatalf("expected missing profile name to be preserved, got %q", name)
+	}
+}
+
+func TestProfileNamesAreSorted(t *testing.T) {
+	names := profileNames(ProfileStore{Profiles: map[string]SavedProfile{
+		"prod":    {},
+		"default": {},
+		"stage":   {},
+	}})
+	expected := []string{"default", "prod", "stage"}
+	if !reflect.DeepEqual(names, expected) {
+		t.Fatalf("expected sorted profile names %v, got %v", expected, names)
+	}
+}
+
+func TestDefaultYesNoForCurrentProfile(t *testing.T) {
+	if got := defaultYesNoForCurrentProfile(ProfileStore{}, "default"); got != "yes" {
+		t.Fatalf("expected empty current profile default yes, got %q", got)
+	}
+	if got := defaultYesNoForCurrentProfile(ProfileStore{CurrentProfile: "default"}, "default"); got != "yes" {
+		t.Fatalf("expected matching current profile default yes, got %q", got)
+	}
+	if got := defaultYesNoForCurrentProfile(ProfileStore{CurrentProfile: "prod"}, "default"); got != "no" {
+		t.Fatalf("expected different current profile default no, got %q", got)
+	}
+}
+
+func TestNextNewProfileName(t *testing.T) {
+	if got := nextNewProfileName(ProfileStore{Profiles: map[string]SavedProfile{}}); got != "default" {
+		t.Fatalf("expected default for empty store, got %q", got)
+	}
+	got := nextNewProfileName(ProfileStore{Profiles: map[string]SavedProfile{
+		"default":   {},
+		"profile-2": {},
+	}})
+	if got != "profile-3" {
+		t.Fatalf("expected profile-3, got %q", got)
+	}
+}
+
 func TestApplySavedProfileKeepsSkippedFilterScopeAnswered(t *testing.T) {
 	cfg := Config{}
 	applySavedProfile(&cfg, SavedProfile{
@@ -381,7 +460,7 @@ func TestSavedProfileFromConfigPersistsFilterScopeSettings(t *testing.T) {
 		FilterDataSource:            filterDataSourceScriptRunner,
 		FilterSourceCSV:             "/tmp/source-filters.csv",
 		FilterScriptRunnerInstalled: true,
-		FilterScriptRunnerEndpoint:  "https://source.example.com/jira/rest/scriptrunner/latest/custom/findTeamFiltersDB?enabled=true&lastId=0&limit=500&teamFieldId=16604",
+		FilterScriptRunnerEndpoint:  "https://source.example.com/jira/rest/scriptrunner/latest/custom/findSourceTeamFiltersDB?enabled=true&lastId=0&limit=500&teamFieldId=16604",
 	}, false)
 	if !profile.FilterTeamIDsInScope || !profile.FilterTeamIDsInScopeSet {
 		t.Fatalf("expected filter scope settings to persist, got %#v", profile)
@@ -1374,6 +1453,47 @@ func TestPreparePostMigrationTargetFilterArtifactsWritesSnapshotMatchAndComparis
 	}
 	if !reflect.DeepEqual(comparisonRecords, wantComparison) {
 		t.Fatalf("unexpected filter comparison CSV:\nwant: %#v\ngot:  %#v", wantComparison, comparisonRecords)
+	}
+}
+
+func TestLoadTargetFiltersForSourceFilterAcceptsQuotedNumericTeamJQL(t *testing.T) {
+	jql := `project = "Test Project" AND team in ("4", 5)`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/scriptrunner/latest/custom/findTargetTeamFiltersDB":
+			if got := r.URL.Query().Get("filterName"); got != "Tes filter for Team" {
+				t.Fatalf("unexpected filterName query %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"meta":{"lastId":0,"nextLastId":21402,"scanned":1,"matched":1,"parseErrorCount":0,"limit":500,"dbMode":"sql","durationMs":1},"results":[{"id":21402,"name":"Tes filter for Team","owner":"Jane Doe","jql":` + strconv.Quote(jql) + `}],"parseErrors":[]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	filters, findings, err := loadTargetFiltersForSourceFilter(client, "16604", FilterTeamClauseRow{
+		FilterName: "Tes filter for Team",
+		Owner:      "Jane Doe",
+	})
+	if err != nil {
+		t.Fatalf("loadTargetFiltersForSourceFilter returned error: %v", err)
+	}
+	if len(filters) != 1 {
+		t.Fatalf("expected 1 target filter, got %d", len(filters))
+	}
+	if filters[0].ID != "21402" || filters[0].JQL != jql {
+		t.Fatalf("unexpected target filter: %#v", filters[0])
+	}
+	for _, finding := range findings {
+		if finding.Code == "post_migrate_target_filter_parse_errors" {
+			t.Fatalf("unexpected parse warning: %#v", finding)
+		}
 	}
 }
 

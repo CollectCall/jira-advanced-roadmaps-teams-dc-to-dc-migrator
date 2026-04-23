@@ -96,6 +96,32 @@ func loadParentLinkRowsFromExport(path string) ([]ParentLinkRow, error) {
 	return rows, nil
 }
 
+func loadParentLinkFieldFromExport(path string) (*ParentLinkFieldRow, error) {
+	records, err := readCSVRecordsFromFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) <= 1 {
+		return nil, nil
+	}
+
+	record := records[1]
+	if len(record) < 2 {
+		return nil, fmt.Errorf("parent link field export row has %d column(s), expected at least 2", len(record))
+	}
+	row := &ParentLinkFieldRow{
+		FieldID:   record[0],
+		FieldName: record[1],
+	}
+	if len(record) > 2 {
+		row.SchemaCustom = record[2]
+	}
+	if len(record) > 3 {
+		row.SchemaType = record[3]
+	}
+	return row, nil
+}
+
 func loadTeamMappingsFromExport(path string) ([]TeamMapping, error) {
 	records, err := readCSVRecordsFromFile(path)
 	if err != nil {

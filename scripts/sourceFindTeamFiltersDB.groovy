@@ -21,7 +21,7 @@ import org.ofbiz.core.entity.DelegatorInterface
 @Field static String DB_PRODUCT = null
 
 
-findTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String body, HttpServletRequest request ->
+findSourceTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String body, HttpServletRequest request ->
 
     def startTime = System.currentTimeMillis()
 

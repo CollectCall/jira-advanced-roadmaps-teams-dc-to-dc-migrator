@@ -97,7 +97,7 @@ func printSummary(w io.Writer, report Report, reportPaths []string) {
 
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, theme.style("Results", theme.titleColor))
-	fmt.Fprintf(w, "- Planned/applied actions: %d\n", countMigrationActions(report.Actions))
+	fmt.Fprintf(w, "- %s: %d\n", migrationActionCountLabel(report), countMigrationActions(report.Actions))
 	fmt.Fprintf(w, "- Warnings: %d\n", report.Stats.Warnings)
 	fmt.Fprintf(w, "- Errors: %d\n", report.Stats.Errors)
 
@@ -120,6 +120,11 @@ func printSummary(w io.Writer, report Report, reportPaths []string) {
 
 	infoLines, warningLines, errorLines := categorizeFindings(report.Findings)
 	if len(errorLines) > 0 {
+		if hasJiraConnectivityFinding(report.Findings) {
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, theme.style("Connectivity", theme.hintColor))
+			fmt.Fprintln(w, "- Could not reach source/target Jira. Check base URL, VPN/DNS, and credentials.")
+		}
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, theme.style("Errors", theme.errorColor))
 		for _, line := range errorLines {
@@ -140,6 +145,13 @@ func printSummary(w io.Writer, report Report, reportPaths []string) {
 			fmt.Fprintf(w, "- %s\n", line)
 		}
 	}
+}
+
+func migrationActionCountLabel(report Report) string {
+	if report.Command == "migrate" && report.DryRun {
+		return "Planned actions"
+	}
+	return "Applied actions"
 }
 
 func summaryTitle(report Report) string {
@@ -287,6 +299,43 @@ func categorizeFindings(findings []Finding) (infoLines, warningLines, errorLines
 	return uniqueStrings(infoLines), uniqueStrings(warningLines), uniqueStrings(errorLines)
 }
 
+func hasJiraConnectivityFinding(findings []Finding) bool {
+	for _, finding := range findings {
+		if isArtifactFinding(finding.Code) {
+			continue
+		}
+		if finding.Severity != SeverityError && finding.Severity != SeverityWarning {
+			continue
+		}
+		if isJiraConnectivityMessage(finding.Message) {
+			return true
+		}
+	}
+	return false
+}
+
+func isJiraConnectivityMessage(message string) bool {
+	lower := strings.ToLower(message)
+	needles := []string{
+		"dial tcp",
+		"no such host",
+		"connection refused",
+		"connection reset",
+		"i/o timeout",
+		"context deadline exceeded",
+		"tls handshake timeout",
+		"jira authentication failed",
+		"returned 401",
+		"returned 403",
+	}
+	for _, needle := range needles {
+		if strings.Contains(lower, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 func isArtifactFinding(code string) bool {
 	if strings.HasSuffix(code, "_generated") {
 		return true
@@ -400,15 +449,46 @@ func summaryPreviews(report Report) []previewSection {
 
 	sections := []previewSection{}
 	if rows := preMigratePreviewLines(imd); len(rows) > 0 {
-		sections = append(sections, previewSection{Title: "Pre-migrate Preview", Lines: rows})
+		sections = append(sections, previewSection{Title: phasePreviewTitle(report, phasePreMigrate), Lines: rows})
 	}
 	if rows := migratePreviewLines(imd); len(rows) > 0 {
-		sections = append(sections, previewSection{Title: "Migrate Preview", Lines: rows})
+		sections = append(sections, previewSection{Title: phasePreviewTitle(report, phaseMigrate), Lines: rows})
 	}
 	if rows := postMigratePreviewLines(imd); len(rows) > 0 {
-		sections = append(sections, previewSection{Title: "Post-migrate Preview", Lines: rows})
+		sections = append(sections, previewSection{Title: phasePreviewTitle(report, phasePostMigrate), Lines: rows})
 	}
 	return sections
+}
+
+func phasePreviewTitle(report Report, phase string) string {
+	if report.Command != "migrate" || report.DryRun {
+		switch phase {
+		case phasePreMigrate:
+			return "Pre-migrate Preview"
+		case phaseMigrate:
+			return "Migrate Preview"
+		case phasePostMigrate:
+			return "Post-migrate Preview"
+		}
+	}
+
+	current := reportPhase(report)
+	switch phase {
+	case phasePreMigrate:
+		return "Pre-migrate Artifacts"
+	case phaseMigrate:
+		if current == phaseMigrate || current == phasePostMigrate {
+			return "Migrate Results"
+		}
+		return "Migrate Preview"
+	case phasePostMigrate:
+		if current == phasePostMigrate {
+			return "Post-migrate Results"
+		}
+		return "Post-migrate Preview"
+	default:
+		return "Preview"
+	}
 }
 
 func metadataIMD(report Report) map[string]any {
@@ -1252,11 +1332,9 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --source-base-url       Source Jira base URL")
 	fmt.Fprintln(w, "  --source-username       Source Jira username for basic auth")
 	fmt.Fprintln(w, "  --source-password       Source Jira password for basic auth")
-	fmt.Fprintln(w, "  --source-cookie         Source Jira Cookie header value for session-authenticated instances")
 	fmt.Fprintln(w, "  --target-base-url       Target Jira base URL")
 	fmt.Fprintln(w, "  --target-username       Target Jira username for basic auth")
 	fmt.Fprintln(w, "  --target-password       Target Jira password for basic auth")
-	fmt.Fprintln(w, "  --target-cookie         Target Jira Cookie header value for session-authenticated instances")
 	fmt.Fprintln(w, "  --identity-mapping      Path to identity mapping CSV")
 	fmt.Fprintln(w, "  --teams-file            Path to source teams JSON export")
 	fmt.Fprintln(w, "  --persons-file          Path to source persons JSON export")
