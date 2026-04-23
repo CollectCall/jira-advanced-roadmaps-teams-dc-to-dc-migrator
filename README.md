@@ -5,7 +5,7 @@
 [![Smoke Test](https://github.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/actions/workflows/smoke-test.yml/badge.svg)](https://github.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/actions/workflows/smoke-test.yml)
 [![License](https://img.shields.io/github/license/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator)](./LICENSE)
 
-`teams-migrator` is a Go CLI for migrating Jira Advanced Roadmaps teams and team memberships between Jira Server or Data Center instances. It prepares reviewable artifacts first, then applies only the team, membership, and optional follow-up corrections that can be matched safely.
+`teams-migrator` is a Go CLI for migrating teams and team memberships from Advanced Roadmaps for Jira Server & Data Center (previously Portfolio for Jira Server and Data Center) between Jira Server or Data Center instances. It prepares reviewable artifacts first, then applies only the team, membership, and optional follow-up corrections that can be matched safely.
 
 This project does not support Jira Cloud.
 
