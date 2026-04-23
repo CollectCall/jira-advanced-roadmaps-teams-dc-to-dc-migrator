@@ -19,6 +19,13 @@ func float64ptr(v float64) *float64 {
 	return &v
 }
 
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write test file %s: %v", path, err)
+	}
+}
+
 func TestBuildTeamMappingsSkipsNonSharedTeamWithoutTargetMatch(t *testing.T) {
 	cfg := Config{TeamScope: "all"}
 	sourceTeams := []TeamDTO{{ID: 10, Title: "Private Alpha", Shareable: false}}
@@ -109,6 +116,46 @@ func TestSourceNeedsAuthWhenPasswordMissing(t *testing.T) {
 		SourceUsername: "alice",
 	}) {
 		t.Fatal("expected source auth prompt when password is missing")
+	}
+}
+
+func TestSourceDoesNotNeedAuthForPreparedPostMigrateArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "team-id-mapping.migration.csv"), strings.Join([]string{
+		"Source Team ID,Source Team Name,Source Shareable,Target Team ID,Target Team Name,Migration Status,Reason,Conflict Reason",
+		"101,Platform,true,501,Platform,created,,",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(dir, "issues-with-teams.pre-migration.csv"), strings.Join([]string{
+		"Issue Key,Project Key,Project Name,Project Type,Summary,Source Team IDs,Source Team Names,Teams Field ID",
+		"ABC-1,ABC,Project,software,Summary,101,Platform,customfield_10001",
+	}, "\n"))
+
+	if sourceNeedsAuth(Config{
+		Command:        "migrate",
+		Phase:          phasePostMigrate,
+		OutputDir:      dir,
+		SourceBaseURL:  "https://source.example.com/jira",
+		SourceUsername: "alice",
+	}) {
+		t.Fatal("did not expect source auth prompt when post-migrate can use prepared artifacts")
+	}
+}
+
+func TestSourceNeedsAuthForPostMigrateWhenPreparedArtifactsAreIncomplete(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "team-id-mapping.migration.csv"), strings.Join([]string{
+		"Source Team ID,Source Team Name,Source Shareable,Target Team ID,Target Team Name,Migration Status,Reason,Conflict Reason",
+		"101,Platform,true,501,Platform,created,,",
+	}, "\n"))
+
+	if !sourceNeedsAuth(Config{
+		Command:        "migrate",
+		Phase:          phasePostMigrate,
+		OutputDir:      dir,
+		SourceBaseURL:  "https://source.example.com/jira",
+		SourceUsername: "alice",
+	}) {
+		t.Fatal("expected source auth prompt when post-migrate source artifacts are incomplete")
 	}
 }
 

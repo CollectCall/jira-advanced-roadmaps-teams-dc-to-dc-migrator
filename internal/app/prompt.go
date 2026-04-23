@@ -82,7 +82,8 @@ func completeConfigInteractively(cfg *Config) error {
 	}
 
 	sourceMode := inferSourceMode(*cfg)
-	if sourceMode == "" {
+	usePostMigrateArtifacts := postMigrateCanUsePreparedArtifacts(*cfg)
+	if sourceMode == "" && !usePostMigrateArtifacts {
 		value, err := wizard.choice(wizardField{
 			Label:        "Source data mode",
 			Description:  "Choose whether source teams/persons/resources should come from exported JSON files or directly from the source Jira API.",
@@ -146,7 +147,7 @@ func completeConfigInteractively(cfg *Config) error {
 				return err
 			}
 		}
-	} else {
+	} else if !usePostMigrateArtifacts {
 		var err error
 		if cfg.SourceBaseURL == "" {
 			cfg.SourceBaseURL, err = wizard.value(wizardField{
@@ -287,7 +288,8 @@ func completeMigrateSessionInteractively(cfg *Config) error {
 	}
 
 	sourceMode := inferSourceMode(*cfg)
-	if sourceMode == "" {
+	usePostMigrateArtifacts := postMigrateCanUsePreparedArtifacts(*cfg)
+	if sourceMode == "" && !usePostMigrateArtifacts {
 		value, err := wizard.choice(wizardField{
 			Label:        "Source data mode",
 			Description:  "Choose whether source teams/persons/resources should come from exported JSON files or directly from the source Jira API.",
@@ -351,7 +353,7 @@ func completeMigrateSessionInteractively(cfg *Config) error {
 				return err
 			}
 		}
-	} else {
+	} else if !usePostMigrateArtifacts {
 		var err error
 		if cfg.SourceBaseURL == "" {
 			cfg.SourceBaseURL, err = wizard.value(wizardField{
@@ -444,6 +446,9 @@ func inferSourceModeOrDefault(cfg Config) string {
 }
 
 func sourceNeedsAuth(cfg Config) bool {
+	if postMigrateCanUsePreparedArtifacts(cfg) {
+		return false
+	}
 	return strings.TrimSpace(cfg.SourceBaseURL) != "" && (strings.TrimSpace(cfg.SourceUsername) == "" || strings.TrimSpace(cfg.SourcePassword) == "")
 }
 
