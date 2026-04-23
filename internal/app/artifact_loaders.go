@@ -106,9 +106,9 @@ func loadTeamMappingsFromExport(path string) ([]TeamMapping, error) {
 	}
 
 	header := indexCSVHeader(records[0])
-	required := []string{"sourceteamid", "sourcetitle", "targetteamid", "targettitle", "decision"}
+	required := []string{"sourceteamid", "decision"}
 	if _, ok := header["migrationstatus"]; ok {
-		required = []string{"sourceteamid", "sourceteamname", "targetteamid", "targetteamname", "migrationstatus"}
+		required = []string{"sourceteamid", "migrationstatus"}
 	}
 	for _, key := range required {
 		if _, ok := header[key]; !ok {
@@ -126,23 +126,93 @@ func loadTeamMappingsFromExport(path string) ([]TeamMapping, error) {
 		if sourceTitle == "" {
 			sourceTitle = csvValue(record, header, "sourceteamname")
 		}
+		if sourceTitle == "" {
+			return nil, fmt.Errorf("team mapping export row for source team %d is missing source title", sourceID)
+		}
 		targetTitle := csvValue(record, header, "targettitle")
 		if targetTitle == "" {
 			targetTitle = csvValue(record, header, "targetteamname")
+		}
+		if targetTitle == "" {
+			targetTitle = csvValue(record, header, "destinationtitle")
 		}
 		decision := csvValue(record, header, "decision")
 		if decision == "" {
 			decision = csvValue(record, header, "migrationstatus")
 		}
+		targetTeamID := csvValue(record, header, "targetteamid")
+		if targetTeamID == "" {
+			targetTeamID = csvValue(record, header, "destinationteamid")
+		}
 		rows = append(rows, TeamMapping{
 			SourceTeamID:    sourceID,
 			SourceTitle:     sourceTitle,
 			SourceShareable: parseCSVBool(csvValue(record, header, "sourceshareable")),
-			TargetTeamID:    csvValue(record, header, "targetteamid"),
+			TargetTeamID:    targetTeamID,
 			TargetTitle:     targetTitle,
 			Decision:        decision,
 			Reason:          csvValue(record, header, "reason"),
 			ConflictReason:  csvValue(record, header, "conflictreason"),
+		})
+	}
+	return rows, nil
+}
+
+func loadResourcePlansFromExport(path string) ([]ResourcePlan, error) {
+	records, err := readCSVRecordsFromFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) <= 1 {
+		return nil, nil
+	}
+
+	header := indexCSVHeader(records[0])
+	for _, key := range []string{"sourceresourceid", "sourceteamid", "sourcepersonid"} {
+		if _, ok := header[key]; !ok {
+			return nil, fmt.Errorf("team membership mapping export is missing %q column", key)
+		}
+	}
+
+	rows := make([]ResourcePlan, 0, len(records)-1)
+	for _, record := range records[1:] {
+		sourceResourceID, err := strconv.ParseInt(csvValue(record, header, "sourceresourceid"), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid source resource ID %q: %w", csvValue(record, header, "sourceresourceid"), err)
+		}
+		sourceTeamID, err := strconv.ParseInt(csvValue(record, header, "sourceteamid"), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid source team ID %q: %w", csvValue(record, header, "sourceteamid"), err)
+		}
+		sourcePersonID, err := strconv.ParseInt(csvValue(record, header, "sourcepersonid"), 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid source person ID %q: %w", csvValue(record, header, "sourcepersonid"), err)
+		}
+		status := csvValue(record, header, "status")
+		if status == "" {
+			status = "planned"
+		}
+		targetTeamID := csvValue(record, header, "targetteamid")
+		if targetTeamID == "" {
+			targetTeamID = csvValue(record, header, "destinationteamid")
+		}
+		targetTeamName := csvValue(record, header, "targetteamname")
+		if targetTeamName == "" {
+			targetTeamName = csvValue(record, header, "destinationteamname")
+		}
+		rows = append(rows, ResourcePlan{
+			SourceResourceID: sourceResourceID,
+			SourceTeamID:     sourceTeamID,
+			SourceTeamName:   csvValue(record, header, "sourceteamname"),
+			SourcePersonID:   sourcePersonID,
+			SourceEmail:      csvValue(record, header, "sourceemail"),
+			TargetEmail:      csvValue(record, header, "destinationemail"),
+			TargetTeamID:     targetTeamID,
+			TargetTeamName:   targetTeamName,
+			TargetUserID:     csvValue(record, header, "destinationuserid"),
+			WeeklyHours:      parseCSVFloatPtr(csvValue(record, header, "weeklyhours")),
+			Status:           status,
+			Reason:           csvValue(record, header, "reason"),
 		})
 	}
 	return rows, nil
@@ -175,6 +245,17 @@ func csvValue(record []string, header map[string]int, key string) string {
 func parseCSVBool(value string) bool {
 	parsed, err := strconv.ParseBool(strings.TrimSpace(value))
 	return err == nil && parsed
+}
+
+func parseCSVFloatPtr(value string) *float64 {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+	if err != nil {
+		return nil
+	}
+	return &parsed
 }
 
 func readCSVRecordsFromFile(path string) ([][]string, error) {

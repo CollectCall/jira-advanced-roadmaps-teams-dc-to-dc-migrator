@@ -1180,6 +1180,12 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 		findings = append(findings, artifactFindings...)
 		return state, findings
 	}
+	if runsMigratePhase(cfg.Command, cfg.Phase) && migrateCanUsePreparedArtifacts(cfg) {
+		state, artifactFindings := loadMigrateStateFromPreparedArtifacts(cfg, progress)
+		state.IdentityMappings = mapping
+		findings = append(findings, artifactFindings...)
+		return state, findings
+	}
 
 	var (
 		sourceTeams     []TeamDTO
@@ -1467,11 +1473,65 @@ func postMigrateCanUsePreparedArtifacts(cfg Config) bool {
 	return true
 }
 
+func migrateCanUsePreparedArtifacts(cfg Config) bool {
+	if !runsMigratePhase(cfg.Command, cfg.Phase) {
+		return false
+	}
+	if _, ok := latestOutputFamilyPath(cfg.OutputDir, "team-mapping.pre-migration.csv"); !ok {
+		return false
+	}
+	if _, ok := latestOutputFamilyPath(cfg.OutputDir, "team-membership-mapping.pre-migration.csv"); !ok {
+		return false
+	}
+	return true
+}
+
 func latestPostMigrateTeamMappingPath(outputDir string) (string, bool) {
 	if path, ok := latestOutputFamilyPath(outputDir, "team-id-mapping.migration.csv"); ok {
 		return path, true
 	}
 	return latestOutputFamilyPath(outputDir, "team-mapping.pre-migration.csv")
+}
+
+func loadMigrateStateFromPreparedArtifacts(cfg Config, progress *progressTracker) (migrationState, []Finding) {
+	var findings []Finding
+	state := migrationState{}
+
+	if mappingPath, ok := latestOutputFamilyPath(cfg.OutputDir, "team-mapping.pre-migration.csv"); ok {
+		progressStart(progress, "Loading pre-migration team mapping")
+		rows, err := loadTeamMappingsFromExport(mappingPath)
+		if err != nil {
+			findings = append(findings, newFinding(SeverityError, "migrate_team_mapping_load_failed", fmt.Sprintf("Could not load team mapping export %s: %v", mappingPath, err)))
+		} else {
+			state.TeamMappings = rows
+			state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+				Key:   "team_mapping",
+				Label: "Team mapping comparison",
+				Path:  mappingPath,
+				Count: len(rows),
+			})
+			findings = append(findings, newFinding(SeverityInfo, "migrate_team_mapping_reused", fmt.Sprintf("Reused team mapping export: %s", mappingPath)))
+		}
+		progressEnd(progress)
+	}
+	if membershipPath, ok := latestOutputFamilyPath(cfg.OutputDir, "team-membership-mapping.pre-migration.csv"); ok {
+		progressStart(progress, "Loading pre-migration team membership mapping")
+		rows, err := loadResourcePlansFromExport(membershipPath)
+		if err != nil {
+			findings = append(findings, newFinding(SeverityError, "migrate_membership_mapping_load_failed", fmt.Sprintf("Could not load team membership mapping export %s: %v", membershipPath, err)))
+		} else {
+			state.ResourcePlans = rows
+			state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+				Key:   "team_membership_mapping",
+				Label: "Team membership mapping comparison",
+				Path:  membershipPath,
+				Count: len(rows),
+			})
+			findings = append(findings, newFinding(SeverityInfo, "migrate_membership_mapping_reused", fmt.Sprintf("Reused team membership mapping export: %s", membershipPath)))
+		}
+		progressEnd(progress)
+	}
+	return state, findings
 }
 
 func loadPostMigrateStateFromPreparedArtifacts(cfg Config, progress *progressTracker) (migrationState, []Finding) {

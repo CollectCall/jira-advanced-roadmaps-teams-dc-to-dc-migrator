@@ -141,6 +141,77 @@ func TestSourceDoesNotNeedAuthForPreparedPostMigrateArtifacts(t *testing.T) {
 	}
 }
 
+func TestSourceDoesNotNeedAuthForPreparedMigrateArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "team-mapping.pre-migration.csv"), strings.Join([]string{
+		"sourceTeamId,sourceTitle,sourceShareable,destinationTeamId,destinationTitle,decision,reason",
+		"101,Platform,true,501,Platform,merge,",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(dir, "team-membership-mapping.pre-migration.csv"), strings.Join([]string{
+		"sourceResourceId,sourceTeamId,sourceTeamName,sourcePersonId,sourceEmail,destinationEmail,destinationTeamId,destinationTeamName,destinationUserId,weeklyHours,status,reason",
+		"900,101,Platform,300,alice@example.com,alice@example.com,501,Platform,alice,40,planned,",
+	}, "\n"))
+
+	if sourceNeedsAuth(Config{
+		Command:        "migrate",
+		Phase:          phaseMigrate,
+		OutputDir:      dir,
+		SourceBaseURL:  "https://source.example.com/jira",
+		SourceUsername: "alice",
+	}) {
+		t.Fatal("did not expect source auth prompt when migrate can use prepared artifacts")
+	}
+}
+
+func TestSourceNeedsAuthForMigrateWhenPreparedArtifactsAreIncomplete(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "team-mapping.pre-migration.csv"), strings.Join([]string{
+		"sourceTeamId,sourceTitle,sourceShareable,destinationTeamId,destinationTitle,decision,reason",
+		"101,Platform,true,501,Platform,merge,",
+	}, "\n"))
+
+	if !sourceNeedsAuth(Config{
+		Command:        "migrate",
+		Phase:          phaseMigrate,
+		OutputDir:      dir,
+		SourceBaseURL:  "https://source.example.com/jira",
+		SourceUsername: "alice",
+	}) {
+		t.Fatal("expected source auth prompt when migrate source artifacts are incomplete")
+	}
+}
+
+func TestLoadMigrateStateFromPreparedArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "team-mapping.pre-migration.csv"), strings.Join([]string{
+		"sourceTeamId,sourceTitle,sourceShareable,destinationTeamId,destinationTitle,decision,reason",
+		"101,Platform,true,501,Platform,merge,",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(dir, "team-membership-mapping.pre-migration.csv"), strings.Join([]string{
+		"sourceResourceId,sourceTeamId,sourceTeamName,sourcePersonId,sourceEmail,destinationEmail,destinationTeamId,destinationTeamName,destinationUserId,weeklyHours,status,reason",
+		"900,101,Platform,300,alice@example.com,alice@example.com,501,Platform,alice,40,planned,",
+	}, "\n"))
+
+	state, findings := loadMigrationState(Config{
+		Command:   "migrate",
+		Phase:     phaseMigrate,
+		OutputDir: dir,
+	})
+
+	if hasErrors(findings) {
+		t.Fatalf("expected no errors, got %#v", findings)
+	}
+	if len(state.TeamMappings) != 1 || state.TeamMappings[0].TargetTeamID != "501" {
+		t.Fatalf("expected team mapping loaded from artifacts, got %#v", state.TeamMappings)
+	}
+	if len(state.ResourcePlans) != 1 || state.ResourcePlans[0].TargetUserID != "alice" {
+		t.Fatalf("expected resource plan loaded from artifacts, got %#v", state.ResourcePlans)
+	}
+	if state.ResourcePlans[0].WeeklyHours == nil || *state.ResourcePlans[0].WeeklyHours != 40 {
+		t.Fatalf("expected weekly hours 40, got %#v", state.ResourcePlans[0].WeeklyHours)
+	}
+}
+
 func TestSourceNeedsAuthForPostMigrateWhenPreparedArtifactsAreIncomplete(t *testing.T) {
 	dir := t.TempDir()
 	writeTestFile(t, filepath.Join(dir, "team-id-mapping.migration.csv"), strings.Join([]string{

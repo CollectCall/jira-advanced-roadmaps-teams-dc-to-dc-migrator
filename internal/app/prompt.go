@@ -82,8 +82,8 @@ func completeConfigInteractively(cfg *Config) error {
 	}
 
 	sourceMode := inferSourceMode(*cfg)
-	usePostMigrateArtifacts := postMigrateCanUsePreparedArtifacts(*cfg)
-	if sourceMode == "" && !usePostMigrateArtifacts {
+	usePreparedSourceArtifacts := canUsePreparedSourceArtifacts(*cfg)
+	if sourceMode == "" && !usePreparedSourceArtifacts {
 		value, err := wizard.choice(wizardField{
 			Label:        "Source data mode",
 			Description:  "Choose whether source teams/persons/resources should come from exported JSON files or directly from the source Jira API.",
@@ -147,7 +147,7 @@ func completeConfigInteractively(cfg *Config) error {
 				return err
 			}
 		}
-	} else if !usePostMigrateArtifacts {
+	} else if !usePreparedSourceArtifacts {
 		var err error
 		if cfg.SourceBaseURL == "" {
 			cfg.SourceBaseURL, err = wizard.value(wizardField{
@@ -288,8 +288,8 @@ func completeMigrateSessionInteractively(cfg *Config) error {
 	}
 
 	sourceMode := inferSourceMode(*cfg)
-	usePostMigrateArtifacts := postMigrateCanUsePreparedArtifacts(*cfg)
-	if sourceMode == "" && !usePostMigrateArtifacts {
+	usePreparedSourceArtifacts := canUsePreparedSourceArtifacts(*cfg)
+	if sourceMode == "" && !usePreparedSourceArtifacts {
 		value, err := wizard.choice(wizardField{
 			Label:        "Source data mode",
 			Description:  "Choose whether source teams/persons/resources should come from exported JSON files or directly from the source Jira API.",
@@ -353,7 +353,7 @@ func completeMigrateSessionInteractively(cfg *Config) error {
 				return err
 			}
 		}
-	} else if !usePostMigrateArtifacts {
+	} else if !usePreparedSourceArtifacts {
 		var err error
 		if cfg.SourceBaseURL == "" {
 			cfg.SourceBaseURL, err = wizard.value(wizardField{
@@ -446,10 +446,14 @@ func inferSourceModeOrDefault(cfg Config) string {
 }
 
 func sourceNeedsAuth(cfg Config) bool {
-	if postMigrateCanUsePreparedArtifacts(cfg) {
+	if canUsePreparedSourceArtifacts(cfg) {
 		return false
 	}
 	return strings.TrimSpace(cfg.SourceBaseURL) != "" && (strings.TrimSpace(cfg.SourceUsername) == "" || strings.TrimSpace(cfg.SourcePassword) == "")
+}
+
+func canUsePreparedSourceArtifacts(cfg Config) bool {
+	return postMigrateCanUsePreparedArtifacts(cfg) || migrateCanUsePreparedArtifacts(cfg)
 }
 
 func targetNeedsAuth(cfg Config) bool {
