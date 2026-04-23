@@ -117,7 +117,7 @@ findSourceTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
         DatabaseUtil.withSql('local') { sql ->
 
             def rows = sql.rows("""
-                SELECT id
+                SELECT id, filtername, authorname, reqcontent
                 FROM searchrequest
                 WHERE id > ${lastId}
                 ORDER BY id
@@ -128,7 +128,7 @@ findSourceTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
                 def id = (row.id as Long)
                 scanned++
                 lastScannedId = id
-                processSingle(id, searchRequestManager, jqlParser, teamFieldId, results, parseErrors)
+                processSingle(id, row.filtername as String, row.authorname as String, row.reqcontent as String, jqlParser, teamFieldId, results, parseErrors)
             }
         }
 
@@ -145,7 +145,13 @@ findSourceTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
             def id = entity.getLong("id")
             scanned++
             lastScannedId = id
-            processSingle(id, searchRequestManager, jqlParser, teamFieldId, results, parseErrors)
+
+            def searchRequest = searchRequestManager.getSearchRequestById(id)
+            def name = searchRequest?.name
+            def author = searchRequest?.owner?.name
+            def jql = searchRequest?.query?.queryString
+
+            processSingle(id, name, author, jql, jqlParser, teamFieldId, results, parseErrors)
         }
     }
 
@@ -172,31 +178,20 @@ findSourceTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
 // PROCESS
 // =========================
 
-def processSingle(id, srm, parser, teamFieldId, results, parseErrors) {
-
-    def sr = srm.getSearchRequestById(id)
-    def jql = sr?.query?.queryString
+def processSingle(id, name, owner, jql, parser, teamFieldId, results, parseErrors) {
     if (!jql) return
 
     def lower = jql.toLowerCase()
     if (!(lower.contains("team") || lower.contains("cf["))) return
 
-    def parsed
-    try {
-        parsed = parser.parseQuery(jql)
-    } catch (Exception e) {
-        parseErrors << id
-        return
-    }
+    if (!sourceJqlHasNumericTeamClause(parser, jql, teamFieldId, parseErrors, id)) return
 
-    if (containsTeamClause(parsed?.whereClause, teamFieldId)) {
-        results << [
-            id    : id,
-            name  : sr?.name,
-            owner : sr?.owner?.name,
-            jql   : jql
-        ]
-    }
+    results << [
+        id    : id,
+        name  : name,
+        owner : owner,
+        jql   : jql
+    ]
 }
 
 
@@ -258,6 +253,48 @@ boolean isTeamClauseMatch(TerminalClause clause, String teamFieldId) {
         op == "EQUALS" || op == "IN"
 
     return isTeamField && isSupportedOperator && clauseHasNumericTeamOperand(clause.toString())
+}
+
+boolean sourceJqlHasNumericTeamClause(def parser, String jql, String teamFieldId, List parseErrors, Long id) {
+    if (!jql) return false
+
+    boolean regexMatch = jqlHasNumericTeamClause(jql, teamFieldId)
+    if (!regexMatch) return false
+
+    try {
+        def parsed = parser.parseQuery(jql)
+        if (containsTeamClause(parsed?.whereClause, teamFieldId)) return true
+    } catch (Exception e) {
+        // Some Jira versions reject or cannot materialize saved filters that still
+        // contain Team ID clauses the migrator can safely rewrite by literal JQL.
+        return true
+    }
+
+    return regexMatch
+}
+
+boolean jqlHasNumericTeamClause(String jql, String teamFieldId) {
+    if (!jql) return false
+
+    def fieldPattern = teamFieldId ?
+            /(?:"?team"?|\bteam\b|"?teams"?|\bteams\b|cf\[[0-9]+\]|cf\[\Q${teamFieldId}\E\])/ :
+            /(?:"?team"?|\bteam\b|"?teams"?|\bteams\b|cf\[[0-9]+\])/
+
+    def equalsPattern = ~/(?i)(^|[^A-Za-z0-9_])${fieldPattern}\s*=\s*["']?[0-9]+["']?([^A-Za-z0-9_]|$)/
+    if ((jql =~ equalsPattern).find()) return true
+
+    def inPattern = ~/(?i)(^|[^A-Za-z0-9_])${fieldPattern}\s+in\s*\(([^)]*)\)/
+    def matcher = jql =~ inPattern
+    while (matcher.find()) {
+        def rawValues = matcher.group(2)
+        if (!rawValues) continue
+        def values = rawValues.split(",")*.trim().findAll { it }
+        if (values && values.every { it.replaceAll(/^["']|["']$/, "").isLong() }) {
+            return true
+        }
+    }
+
+    return false
 }
 
 boolean clauseHasNumericTeamOperand(String clauseText) {

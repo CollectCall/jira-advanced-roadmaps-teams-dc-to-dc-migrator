@@ -1180,6 +1180,12 @@ func buildPostMigrationFilterComparisonRow(sourceRow FilterTeamClauseRow, target
 	rewrittenClause := rewriteTeamIDNumericLiterals(sourceRow.Clause, map[string]string{sourceRow.SourceTeamID: targetTeamID})
 	rewrittenJQL, found := replaceFirstLiteralFold(targetFilter.JQL, sourceRow.Clause, rewrittenClause)
 	if !found {
+		if containsLiteralFold(targetFilter.JQL, rewrittenClause) {
+			row.Status = "already_rewritten"
+			row.RewrittenTargetJQL = targetFilter.JQL
+			row.Reason = "the target filter already contains the mapped destination team ID"
+			return row
+		}
 		row.Status = "source_clause_not_found_in_target_jql"
 		row.Reason = "the exact source clause was not found in the current target filter JQL"
 		return row
@@ -2685,6 +2691,8 @@ func buildPostMigrationFilterRewritePlans(rows []PostMigrationFilterComparisonRo
 		blockingReason := ""
 		rewrittenJQL := currentJQL
 		readyRows := make([]PostMigrationFilterComparisonRow, 0, len(group))
+		noChangeRows := 0
+		alreadyRewrittenRows := 0
 		sort.SliceStable(group, func(i, j int) bool {
 			return len(group[i].SourceClause) > len(group[j].SourceClause)
 		})
@@ -2693,7 +2701,12 @@ func buildPostMigrationFilterRewritePlans(rows []PostMigrationFilterComparisonRo
 			switch row.Status {
 			case "ready":
 				readyRows = append(readyRows, row)
-			case "same_id", "already_rewritten", "no_change":
+			case "already_rewritten":
+				noChangeRows++
+				alreadyRewrittenRows++
+				continue
+			case "same_id", "no_change":
+				noChangeRows++
 				continue
 			default:
 				blockingReason = row.Reason
@@ -2742,6 +2755,9 @@ func buildPostMigrationFilterRewritePlans(rows []PostMigrationFilterComparisonRo
 			status = "blocked"
 			message = blockingReason
 			rewrittenJQL = currentJQL
+		} else if len(readyRows) == 0 && noChangeRows == len(group) && alreadyRewrittenRows > 0 {
+			status = "already_rewritten"
+			message = "The target filter already contains the rewritten destination team IDs"
 		} else if rewrittenJQL == currentJQL {
 			status = "no_change"
 			message = "Rewriting the target filter JQL produced no change"

@@ -978,6 +978,39 @@ func TestBuildPostMigrationFilterRewritePlansRewritesTeamINClauseWithoutCascadin
 	}
 }
 
+func TestBuildPostMigrationFilterComparisonRowDetectsAlreadyRewrittenNumericClause(t *testing.T) {
+	row := buildPostMigrationFilterComparisonRow(FilterTeamClauseRow{
+		FilterID:     "10000",
+		FilterName:   "Numeric Team Filter",
+		Owner:        "Jane Doe",
+		Clause:       "Team = 42",
+		SourceTeamID: "42",
+		JQL:          "project = ABC AND Team = 42",
+	}, JiraFilter{
+		ID:    "9001",
+		Name:  "Numeric Team Filter",
+		Owner: &JiraFilterUser{DisplayName: "Jane Doe"},
+		JQL:   "project = ABC AND Team = 142",
+	}, map[string]string{"42": "142"})
+
+	if row.Status != "already_rewritten" {
+		t.Fatalf("expected already_rewritten row, got %q: %s", row.Status, row.Reason)
+	}
+	if row.RewrittenTargetJQL != "project = ABC AND Team = 142" {
+		t.Fatalf("unexpected rewritten target JQL %q", row.RewrittenTargetJQL)
+	}
+
+	plans := buildPostMigrationFilterRewritePlans([]PostMigrationFilterComparisonRow{row}, map[string]JiraFilter{
+		"9001": {ID: "9001", Name: "Numeric Team Filter", JQL: "project = ABC AND Team = 142"},
+	})
+	if len(plans) != 1 {
+		t.Fatalf("expected 1 plan, got %d", len(plans))
+	}
+	if plans[0].Status != "already_rewritten" {
+		t.Fatalf("expected already_rewritten plan, got %q: %s", plans[0].Status, plans[0].Message)
+	}
+}
+
 func TestWriteFilterTeamClauseExportWritesCSV(t *testing.T) {
 	cfg := Config{OutputDir: t.TempDir(), OutputTimestamp: "20260417-194500"}
 	rows := []FilterTeamClauseRow{{
