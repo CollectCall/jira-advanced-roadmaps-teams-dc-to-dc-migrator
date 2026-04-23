@@ -9,6 +9,7 @@ import javax.servlet.http.HttpServletRequest
 import java.util.Base64
 
 import com.atlassian.jira.component.ComponentAccessor
+import com.atlassian.jira.issue.search.SearchRequestManager
 import com.atlassian.jira.jql.parser.JqlQueryParser
 import com.atlassian.jira.security.Permissions
 import com.atlassian.jira.user.ApplicationUser
@@ -82,6 +83,7 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
     def ownersNorm = normalizedValues(ownersCsv)
 
     def jqlParser = ComponentAccessor.getComponent(JqlQueryParser)
+    def searchRequestManager = ComponentAccessor.getComponent(SearchRequestManager)
 
     def results = []
     def parseErrors = []
@@ -99,22 +101,19 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
         if (!clause) return false
 
         if (clause instanceof TerminalClause) {
-            def field = clause.name
-            def operator = clause.operator
-            def operand = clause.operand
+            def field = (clause.name ?: "").replaceAll('"', '').toLowerCase()
+            def operator = clause.operator?.toString()
 
             boolean fieldMatch =
                     (field == "team") ||
+                    (field == "teams") ||
+                    (field ==~ /cf\[[0-9]+\]/) ||
                     (teamFieldId && field == "cf[${teamFieldId}]")
 
             boolean operatorMatch =
-                    (operator == Operator.EQUALS || operator == Operator.IN)
+                    (operator == "EQUALS" || operator == "IN")
 
-            boolean operandIsId =
-                    (operand instanceof SingleValueOperand && operandValueIsId(operand.value)) ||
-                    (operand instanceof MultiValueOperand && operand.values.every { it instanceof SingleValueOperand && operandValueIsId(it.value) })
-
-            return fieldMatch && operatorMatch && operandIsId
+            return fieldMatch && operatorMatch && clauseHasNumericTeamOperand(clause.toString())
         }
 
         if (clause instanceof AndClause || clause instanceof OrClause) {
@@ -191,9 +190,9 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
                 if (!jqlMayContainTeamClause(jql)) return
 
                 try {
-                    def parsed = jqlParser.parseQuery(jql)
+                    jqlParser.parseQuery(jql)
 
-                    if (!hasTeamIdClause(parsed?.whereClause)) return
+                    if (!jqlHasNumericTeamClause(jql, teamFieldId)) return
 
                     matched++
 
@@ -217,14 +216,8 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
 
         DelegatorInterface delegator = ComponentAccessor.getComponent(DelegatorInterface)
 
-        def rows = delegator.findList(
-                "SearchRequest",
-                null,
-                null,
-                ["id ASC"],
-                null,
-                false
-        )
+        def rows = delegator.findAll("SearchRequest")
+                .sort { it.getLong("id") }
 
         for (row in rows) {
 
@@ -235,9 +228,10 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
             scanned++
             lastScannedId = id
 
-            def name = row.getString("filtername")
-            def author = row.getString("authorname")
-            def jql = row.getString("reqcontent")
+            def searchRequest = searchRequestManager.getSearchRequestById(id)
+            def name = searchRequest?.name
+            def author = searchRequest?.owner?.name
+            def jql = searchRequest?.query?.queryString
 
             def nameNorm = norm(name)
             def authorNorm = norm(author)
@@ -251,9 +245,9 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
             if (!jqlMayContainTeamClause(jql)) continue
 
             try {
-                def parsed = jqlParser.parseQuery(jql)
+                jqlParser.parseQuery(jql)
 
-                if (!hasTeamIdClause(parsed?.whereClause)) continue
+                if (!jqlHasNumericTeamClause(jql, teamFieldId)) continue
 
                 matched++
 
@@ -310,6 +304,30 @@ boolean jqlMayContainTeamClause(String jql) {
     return lower?.contains("team") || lower?.contains("cf[")
 }
 
+boolean jqlHasNumericTeamClause(String jql, String teamFieldId) {
+    if (!jql) return false
+
+    def fieldPattern = teamFieldId ?
+            /(?:"?team"?|\bteam\b|"?teams"?|\bteams\b|cf\[[0-9]+\]|cf\[\Q${teamFieldId}\E\])/ :
+            /(?:"?team"?|\bteam\b|"?teams"?|\bteams\b|cf\[[0-9]+\])/
+
+    def equalsPattern = ~/(?i)(^|[^A-Za-z0-9_])${fieldPattern}\s*=\s*["']?[0-9]+["']?([^A-Za-z0-9_]|$)/
+    if ((jql =~ equalsPattern).find()) return true
+
+    def inPattern = ~/(?i)(^|[^A-Za-z0-9_])${fieldPattern}\s+in\s*\(([^)]*)\)/
+    def matcher = jql =~ inPattern
+    while (matcher.find()) {
+        def rawValues = matcher.group(2)
+        if (!rawValues) continue
+        def values = rawValues.split(",")*.trim().findAll { it }
+        if (values && values.every { it.replaceAll(/^["']|["']$/, "").isLong() }) {
+            return true
+        }
+    }
+
+    return false
+}
+
 List<Clause> notClauseChildren(NotClause clause) {
 
     for (propertyName in ["subClause", "clause", "clauses"]) {
@@ -330,6 +348,17 @@ List<Clause> notClauseChildren(NotClause clause) {
     return []
 }
 
-boolean operandValueIsId(value) {
-    return value != null && value.toString().trim().replaceAll(/^["']|["']$/, "").isLong()
+boolean clauseHasNumericTeamOperand(String clauseText) {
+    if (!clauseText) return false
+
+    def equalsMatch = clauseText =~ /(?i)\s*"?[^"]+"?\s*=\s*["']?([0-9]+)["']?\s*/
+    if (equalsMatch.matches()) return true
+
+    def inMatch = clauseText =~ /(?i)\s*"?[^"]+"?\s+in\s*\((.*)\)\s*/
+    if (!inMatch.matches()) return false
+
+    def rawValues = inMatch[0][1]
+    return rawValues.split(",").every { value ->
+        value.trim().replaceAll(/^["']|["']$/, "").isLong()
+    }
 }

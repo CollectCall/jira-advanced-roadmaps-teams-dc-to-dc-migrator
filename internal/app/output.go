@@ -981,6 +981,7 @@ func filterComparisonRowsFromValue(value any) []PostMigrationFilterComparisonRow
 				SourceFilterID:     asString(row["sourceFilterId"]),
 				SourceFilterName:   asString(row["sourceFilterName"]),
 				SourceOwner:        asString(row["sourceOwner"]),
+				SourceJQL:          asString(row["sourceJql"]),
 				SourceClause:       asString(row["sourceClause"]),
 				SourceTeamID:       asString(row["sourceTeamId"]),
 				TargetFilterID:     asString(row["targetFilterId"]),

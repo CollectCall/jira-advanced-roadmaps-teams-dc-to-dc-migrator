@@ -40,8 +40,8 @@ type teamFilterParseError struct {
 }
 
 var (
-	teamEqualsClausePattern = regexp.MustCompile(`(?i)(?:"?team"?|\bteam\b)\s*=\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_.:-]+))`)
-	teamInClausePattern     = regexp.MustCompile(`(?i)(?:"?team"?|\bteam\b)\s+in\s*\(([^)]*)\)`)
+	teamEqualsClausePattern = regexp.MustCompile(`(?i)(?:"?teams?"?|\bteams?\b|cf\[[0-9]+\])\s*=\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_.:-]+))`)
+	teamInClausePattern     = regexp.MustCompile(`(?i)(?:"?teams?"?|\bteams?\b|cf\[[0-9]+\])\s+in\s*\(([^)]*)\)`)
 )
 
 type teamClauseMatch struct {
@@ -312,6 +312,15 @@ func extractTeamClauseMatches(jql string) []teamClauseMatch {
 	}
 
 	return matches
+}
+
+func hasNumericTeamClause(jql string) bool {
+	for _, match := range extractTeamClauseMatches(jql) {
+		if _, err := strconv.ParseInt(strings.TrimSpace(match.value), 10, 64); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func splitJQLListValues(raw string) []string {

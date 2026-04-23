@@ -1031,6 +1031,7 @@ func buildPostMigrationFilterMatchAndComparisonRows(sourceRows []FilterTeamClaus
 					SourceFilterID:   row.FilterID,
 					SourceFilterName: row.FilterName,
 					SourceOwner:      row.Owner,
+					SourceJQL:        row.JQL,
 					SourceClause:     row.Clause,
 					SourceTeamID:     row.SourceTeamID,
 					Status:           "not_found",
@@ -1071,6 +1072,7 @@ func buildPostMigrationFilterMatchAndComparisonRows(sourceRows []FilterTeamClaus
 					SourceFilterID:   row.FilterID,
 					SourceFilterName: row.FilterName,
 					SourceOwner:      row.Owner,
+					SourceJQL:        row.JQL,
 					SourceClause:     row.Clause,
 					SourceTeamID:     row.SourceTeamID,
 					Status:           "ambiguous",
@@ -1088,6 +1090,7 @@ func buildPostMigrationFilterComparisonRow(sourceRow FilterTeamClauseRow, target
 		SourceFilterID:   sourceRow.FilterID,
 		SourceFilterName: sourceRow.FilterName,
 		SourceOwner:      sourceRow.Owner,
+		SourceJQL:        sourceRow.JQL,
 		SourceClause:     sourceRow.Clause,
 		SourceTeamID:     sourceRow.SourceTeamID,
 		TargetFilterID:   targetFilter.ID,
@@ -1111,14 +1114,15 @@ func buildPostMigrationFilterComparisonRow(sourceRow FilterTeamClauseRow, target
 		return row
 	}
 
-	rewrittenClause := strings.Replace(sourceRow.Clause, sourceRow.ClauseValue, targetTeamID, 1)
-	if !strings.Contains(targetFilter.JQL, sourceRow.Clause) {
+	rewrittenClause := rewriteTeamIDNumericLiterals(sourceRow.Clause, map[string]string{sourceRow.SourceTeamID: targetTeamID})
+	rewrittenJQL, found := replaceFirstLiteralFold(targetFilter.JQL, sourceRow.Clause, rewrittenClause)
+	if !found {
 		row.Status = "source_clause_not_found_in_target_jql"
 		row.Reason = "the exact source clause was not found in the current target filter JQL"
 		return row
 	}
 
-	row.RewrittenTargetJQL = strings.Replace(targetFilter.JQL, sourceRow.Clause, rewrittenClause, 1)
+	row.RewrittenTargetJQL = rewrittenJQL
 	if row.RewrittenTargetJQL == targetFilter.JQL {
 		row.Status = "no_change"
 		row.Reason = "rewriting the target filter JQL produced no change"
@@ -1127,6 +1131,24 @@ func buildPostMigrationFilterComparisonRow(sourceRow FilterTeamClauseRow, target
 
 	row.Status = "ready"
 	return row
+}
+
+func containsLiteralFold(s, substr string) bool {
+	if substr == "" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+}
+
+func replaceFirstLiteralFold(s, old, replacement string) (string, bool) {
+	if old == "" {
+		return s, false
+	}
+	idx := strings.Index(strings.ToLower(s), strings.ToLower(old))
+	if idx < 0 {
+		return s, false
+	}
+	return s[:idx] + replacement + s[idx+len(old):], true
 }
 
 func loadMigrationState(cfg Config) (migrationState, []Finding) {
@@ -2227,6 +2249,7 @@ func applyPostMigrationParentLinkCorrections(client *jiraClient, state *migratio
 type postMigrationFilterRewritePlan struct {
 	SourceFilterID     string
 	SourceFilterName   string
+	SourceJQL          string
 	TargetFilterID     string
 	TargetFilterName   string
 	CurrentTargetJQL   string
@@ -2254,10 +2277,13 @@ func applyPostMigrationFilterCorrections(client *jiraClient, state *migrationSta
 		result := PostMigrationFilterResultRow{
 			SourceFilterID:     plan.SourceFilterID,
 			SourceFilterName:   plan.SourceFilterName,
+			SourceJQL:          plan.SourceJQL,
 			TargetFilterID:     plan.TargetFilterID,
 			TargetFilterName:   plan.TargetFilterName,
 			CurrentTargetJQL:   plan.CurrentTargetJQL,
 			RewrittenTargetJQL: plan.RewrittenTargetJQL,
+			TargetJQLBefore:    plan.CurrentTargetJQL,
+			TargetJQLAfter:     plan.RewrittenTargetJQL,
 			Status:             plan.Status,
 			Message:            plan.Message,
 		}
@@ -2280,6 +2306,8 @@ func applyPostMigrationFilterCorrections(client *jiraClient, state *migrationSta
 			result.Status = "already_rewritten"
 			result.Message = "The target filter already contains the rewritten destination team IDs"
 			result.CurrentTargetJQL = filter.JQL
+			result.TargetJQLBefore = filter.JQL
+			result.TargetJQLAfter = filter.JQL
 			results = append(results, result)
 			continue
 		}
@@ -2287,6 +2315,7 @@ func applyPostMigrationFilterCorrections(client *jiraClient, state *migrationSta
 			result.Status = "drifted"
 			result.Message = "The current target filter JQL has changed since the comparison artifact was generated"
 			result.CurrentTargetJQL = filter.JQL
+			result.TargetJQLBefore = filter.JQL
 			results = append(results, result)
 			continue
 		}
@@ -2306,11 +2335,13 @@ func applyPostMigrationFilterCorrections(client *jiraClient, state *migrationSta
 
 		result.Status = "updated"
 		result.Message = "Updated target filter JQL to the mapped destination team IDs"
+		result.TargetJQLBefore = plan.CurrentTargetJQL
 		if updated != nil && strings.TrimSpace(updated.JQL) != "" {
-			result.CurrentTargetJQL = updated.JQL
+			result.TargetJQLAfter = updated.JQL
 		} else {
-			result.CurrentTargetJQL = plan.RewrittenTargetJQL
+			result.TargetJQLAfter = plan.RewrittenTargetJQL
 		}
+		result.CurrentTargetJQL = plan.CurrentTargetJQL
 		results = append(results, result)
 		actions = append(actions, Action{
 			Kind:     "post_migrate_filter_update",
@@ -2333,6 +2364,7 @@ func buildPostMigrationFilterRewritePlans(rows []PostMigrationFilterComparisonRo
 			blockedWithoutTarget = append(blockedWithoutTarget, postMigrationFilterRewritePlan{
 				SourceFilterID:     row.SourceFilterID,
 				SourceFilterName:   row.SourceFilterName,
+				SourceJQL:          row.SourceJQL,
 				CurrentTargetJQL:   row.CurrentTargetJQL,
 				RewrittenTargetJQL: row.RewrittenTargetJQL,
 				Status:             row.Status,
@@ -2384,6 +2416,7 @@ func buildPostMigrationFilterRewritePlans(rows []PostMigrationFilterComparisonRo
 			plans = append(plans, postMigrationFilterRewritePlan{
 				SourceFilterID:     representative.SourceFilterID,
 				SourceFilterName:   representative.SourceFilterName,
+				SourceJQL:          representative.SourceJQL,
 				TargetFilterID:     representative.TargetFilterID,
 				TargetFilterName:   representative.TargetFilterName,
 				CurrentTargetJQL:   currentJQL,
@@ -2396,15 +2429,16 @@ func buildPostMigrationFilterRewritePlans(rows []PostMigrationFilterComparisonRo
 
 		for _, clauseGroup := range groupReadyFilterRowsByClause(readyRows) {
 			sourceClause := clauseGroup[0].SourceClause
-			rewrittenClause := sourceClause
+			replacements := map[string]string{}
 			for _, row := range clauseGroup {
-				rewrittenClause = strings.Replace(rewrittenClause, row.SourceTeamID, row.TargetTeamID, 1)
+				replacements[row.SourceTeamID] = row.TargetTeamID
 			}
-			if strings.Contains(rewrittenJQL, sourceClause) {
-				rewrittenJQL = strings.Replace(rewrittenJQL, sourceClause, rewrittenClause, 1)
+			rewrittenClause := rewriteTeamIDNumericLiterals(sourceClause, replacements)
+			if updated, ok := replaceFirstLiteralFold(rewrittenJQL, sourceClause, rewrittenClause); ok {
+				rewrittenJQL = updated
 				continue
 			}
-			if strings.Contains(rewrittenJQL, rewrittenClause) {
+			if containsLiteralFold(rewrittenJQL, rewrittenClause) {
 				continue
 			}
 			blockingReason = "the current target filter JQL no longer contains the expected source clause"
@@ -2425,6 +2459,7 @@ func buildPostMigrationFilterRewritePlans(rows []PostMigrationFilterComparisonRo
 		plans = append(plans, postMigrationFilterRewritePlan{
 			SourceFilterID:     representative.SourceFilterID,
 			SourceFilterName:   representative.SourceFilterName,
+			SourceJQL:          representative.SourceJQL,
 			TargetFilterID:     representative.TargetFilterID,
 			TargetFilterName:   representative.TargetFilterName,
 			CurrentTargetJQL:   currentJQL,
@@ -2443,6 +2478,32 @@ func buildPostMigrationFilterRewritePlans(rows []PostMigrationFilterComparisonRo
 		return left < right
 	})
 	return plans
+}
+
+func rewriteTeamIDNumericLiterals(value string, replacements map[string]string) string {
+	if len(replacements) == 0 || value == "" {
+		return value
+	}
+	var out strings.Builder
+	out.Grow(len(value))
+	for i := 0; i < len(value); {
+		if value[i] < '0' || value[i] > '9' {
+			out.WriteByte(value[i])
+			i++
+			continue
+		}
+		start := i
+		for i < len(value) && value[i] >= '0' && value[i] <= '9' {
+			i++
+		}
+		token := value[start:i]
+		if replacement, ok := replacements[token]; ok {
+			out.WriteString(replacement)
+		} else {
+			out.WriteString(token)
+		}
+	}
+	return out.String()
 }
 
 func groupReadyFilterRowsByClause(rows []PostMigrationFilterComparisonRow) [][]PostMigrationFilterComparisonRow {
@@ -2975,6 +3036,7 @@ func writePostMigrationFilterComparisonExport(cfg Config, rows []PostMigrationFi
 			row.SourceFilterID,
 			row.SourceFilterName,
 			row.SourceOwner,
+			row.SourceJQL,
 			row.SourceClause,
 			row.SourceTeamID,
 			row.TargetFilterID,
@@ -2990,7 +3052,7 @@ func writePostMigrationFilterComparisonExport(cfg Config, rows []PostMigrationFi
 	return writeCSVExport(
 		cfg,
 		"filter-jql-comparison.post-migration.csv",
-		[]string{"Source Filter ID", "Source Filter Name", "Source Owner", "Source Clause", "Source Team ID", "Target Filter ID", "Target Filter Name", "Target Owner", "Target Team ID", "Current Target JQL", "Rewritten Target JQL", "Status", "Reason"},
+		[]string{"Source Filter ID", "Source Filter Name", "Source Owner", "Source JQL", "Source Clause", "Source Team ID", "Target Filter ID", "Target Filter Name", "Target Owner", "Target Team ID", "Current Target JQL", "Rewritten Target JQL", "Status", "Reason"},
 		records,
 	)
 }
@@ -3004,10 +3066,12 @@ func writePostMigrationFilterUpdateResultsExport(cfg Config, rows []PostMigratio
 		records = append(records, []string{
 			row.SourceFilterID,
 			row.SourceFilterName,
+			row.SourceJQL,
 			row.TargetFilterID,
 			row.TargetFilterName,
-			row.CurrentTargetJQL,
+			row.TargetJQLBefore,
 			row.RewrittenTargetJQL,
+			row.TargetJQLAfter,
 			row.Status,
 			row.Message,
 		})
@@ -3015,7 +3079,7 @@ func writePostMigrationFilterUpdateResultsExport(cfg Config, rows []PostMigratio
 	return writeCSVExport(
 		cfg,
 		"filter-update-results.post-migration.csv",
-		[]string{"Source Filter ID", "Source Filter Name", "Target Filter ID", "Target Filter Name", "Current Target JQL", "Rewritten Target JQL", "Status", "Message"},
+		[]string{"Source Filter ID", "Source Filter Name", "Source JQL", "Target Filter ID", "Target Filter Name", "Target JQL Before", "Planned Rewritten Target JQL", "Target JQL After", "Status", "Message"},
 		records,
 	)
 }

@@ -731,6 +731,56 @@ func TestBuildPostMigrationFilterRewritePlansCombinesTeamINClauseRows(t *testing
 	}
 }
 
+func TestBuildPostMigrationFilterRewritePlansRewritesTeamINClauseWithoutCascading(t *testing.T) {
+	rows := []PostMigrationFilterComparisonRow{
+		{
+			SourceFilterID:   "10000",
+			SourceFilterName: "Team IN Filter",
+			SourceJQL:        `project = ABC AND Team IN ("5", "6")`,
+			SourceClause:     `Team IN ("5", "6")`,
+			SourceTeamID:     "5",
+			TargetFilterID:   "20000",
+			TargetFilterName: "Team IN Filter",
+			TargetTeamID:     "6",
+			CurrentTargetJQL: `project = ABC AND Team IN ("5", "6")`,
+			Status:           "ready",
+		},
+		{
+			SourceFilterID:   "10000",
+			SourceFilterName: "Team IN Filter",
+			SourceJQL:        `project = ABC AND Team IN ("5", "6")`,
+			SourceClause:     `Team IN ("5", "6")`,
+			SourceTeamID:     "6",
+			TargetFilterID:   "20000",
+			TargetFilterName: "Team IN Filter",
+			TargetTeamID:     "7",
+			CurrentTargetJQL: `project = ABC AND Team IN ("5", "6")`,
+			Status:           "ready",
+		},
+	}
+	filters := map[string]JiraFilter{
+		"20000": {
+			ID:   "20000",
+			Name: "Team IN Filter",
+			JQL:  `project = ABC AND Team IN ("5", "6")`,
+		},
+	}
+
+	plans := buildPostMigrationFilterRewritePlans(rows, filters)
+	if len(plans) != 1 {
+		t.Fatalf("expected 1 plan, got %d", len(plans))
+	}
+	if plans[0].Status != "ready" {
+		t.Fatalf("expected ready plan, got %q: %s", plans[0].Status, plans[0].Message)
+	}
+	if plans[0].SourceJQL != `project = ABC AND Team IN ("5", "6")` {
+		t.Fatalf("unexpected source JQL %q", plans[0].SourceJQL)
+	}
+	if plans[0].RewrittenTargetJQL != `project = ABC AND Team IN ("6", "7")` {
+		t.Fatalf("unexpected rewritten JQL %q", plans[0].RewrittenTargetJQL)
+	}
+}
+
 func TestWriteFilterTeamClauseExportWritesCSV(t *testing.T) {
 	cfg := Config{OutputDir: t.TempDir(), OutputTimestamp: "20260417-194500"}
 	rows := []FilterTeamClauseRow{{
@@ -1201,8 +1251,8 @@ func TestPreparePostMigrationTargetFilterArtifactsWritesSnapshotMatchAndComparis
 	}
 	comparisonRecords := readCSVRecords(t, comparisonPath)
 	wantComparison := [][]string{
-		{"Source Filter ID", "Source Filter Name", "Source Owner", "Source Clause", "Source Team ID", "Target Filter ID", "Target Filter Name", "Target Owner", "Target Team ID", "Current Target JQL", "Rewritten Target JQL", "Status", "Reason"},
-		{"10000", "Numeric Team Filter", "Jane Doe", "Team = 42", "42", "9001", "Numeric Team Filter", "Jane Doe", "142", "project = ABC AND Team = 42", "project = ABC AND Team = 142", "ready", ""},
+		{"Source Filter ID", "Source Filter Name", "Source Owner", "Source JQL", "Source Clause", "Source Team ID", "Target Filter ID", "Target Filter Name", "Target Owner", "Target Team ID", "Current Target JQL", "Rewritten Target JQL", "Status", "Reason"},
+		{"10000", "Numeric Team Filter", "Jane Doe", "project = ABC AND Team = 42", "Team = 42", "42", "9001", "Numeric Team Filter", "Jane Doe", "142", "project = ABC AND Team = 42", "project = ABC AND Team = 142", "ready", ""},
 	}
 	if !reflect.DeepEqual(comparisonRecords, wantComparison) {
 		t.Fatalf("unexpected filter comparison CSV:\nwant: %#v\ngot:  %#v", wantComparison, comparisonRecords)
@@ -1695,8 +1745,8 @@ func TestExecuteMigrationWithStateAppliesPostMigrationCorrections(t *testing.T) 
 	}
 	filterResultRecords := readCSVRecords(t, filterResultsPath)
 	wantFilterResults := [][]string{
-		{"Source Filter ID", "Source Filter Name", "Target Filter ID", "Target Filter Name", "Current Target JQL", "Rewritten Target JQL", "Status", "Message"},
-		{"10000", "Numeric Team Filter", "9001", "Numeric Team Filter", "project = ABC AND Team = 142", "project = ABC AND Team = 142", "updated", "Updated target filter JQL to the mapped destination team IDs"},
+		{"Source Filter ID", "Source Filter Name", "Source JQL", "Target Filter ID", "Target Filter Name", "Target JQL Before", "Planned Rewritten Target JQL", "Target JQL After", "Status", "Message"},
+		{"10000", "Numeric Team Filter", "project = ABC AND Team = 42", "9001", "Numeric Team Filter", "project = ABC AND Team = 42", "project = ABC AND Team = 142", "project = ABC AND Team = 142", "updated", "Updated target filter JQL to the mapped destination team IDs"},
 	}
 	if !reflect.DeepEqual(filterResultRecords, wantFilterResults) {
 		t.Fatalf("unexpected filter update results CSV:\nwant: %#v\ngot:  %#v", wantFilterResults, filterResultRecords)
