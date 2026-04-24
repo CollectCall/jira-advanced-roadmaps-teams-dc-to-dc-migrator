@@ -1284,7 +1284,7 @@ func promptApplyAfterPreview() (applyPreviewChoice, error) {
 	}
 	reader := bufio.NewReader(os.Stdin)
 	renderWizardSection("Teams Migrator | Apply", "Choose next step", []string{
-		"You have just seen the preview for the planned mappings and writes.",
+		"You are viewing the preview before any Jira writes are sent.",
 		"Stopping here keeps this run in dry-run mode. Applying creates records on the target Jira instance where the plan marked them as add or created.",
 		"Non-shared teams cannot be created by this tool and must already exist in the destination plan before migration.",
 		"",

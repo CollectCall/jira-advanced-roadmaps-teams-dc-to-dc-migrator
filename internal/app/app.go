@@ -325,8 +325,8 @@ func runInteractiveApplyPhase(cfg Config, phase string) (Report, bool, error) {
 		if err != nil {
 			return Report{}, false, err
 		}
-		printPhaseBoundary(os.Stdout, phase, "Phase completed", []string{
-			"The write phase finished. Review the completed-phase summary below before continuing.",
+		printPhaseBoundary(os.Stdout, phase, "Apply completed", []string{
+			"The write phase finished. The summary below shows the applied results.",
 		})
 		printSummary(os.Stdout, report, reportPaths)
 		return report, true, nil

@@ -161,7 +161,10 @@ func summaryTitle(report Report) string {
 		case phasePreMigrate:
 			return "Pre-migrate phase completed"
 		case phasePostMigrate:
-			return "Post-migrate phase preview completed"
+			if report.DryRun {
+				return "Post-migrate preview completed"
+			}
+			return "Post-migrate apply completed"
 		}
 		if report.DryRun {
 			return "Migrate phase dry run completed"
@@ -540,28 +543,18 @@ func postMigratePreviewLines(imd map[string]any) []string {
 	mappings := teamMappingsFromValue(imd["teams"])
 	issueRows := issueTeamRowsFromValue(imd["issues"])
 	parentLinkComparisons := parentLinkComparisonRowsFromValue(imd["parentLinkComparisons"])
+	filterMatches := filterMatchRowsFromValue(imd["filterMatches"])
 	filterComparisons := filterComparisonRowsFromValue(imd["filterComparisons"])
 	targetTeamIDs := targetTeamIDsBySource(mappings)
 
-	lines := []string{}
-	issueExamples := 0
+	issueReadyCount := 0
 	for _, row := range issueRows {
-		rewritePairs := mappedTargetTeamRewritePairs(row.SourceTeamIDs, targetTeamIDs)
-		if len(rewritePairs) == 0 {
-			continue
-		}
-		label := row.SourceTeamNames
-		if label == "" {
-			label = row.SourceTeamIDs
-		}
-		lines = append(lines, fmt.Sprintf("Issue update: %s [%s] %s", row.IssueKey, label, strings.Join(rewritePairs, "; ")))
-		issueExamples++
-		if issueExamples == 3 {
-			break
+		if len(mappedTargetTeamRewritePairs(row.SourceTeamIDs, targetTeamIDs)) > 0 {
+			issueReadyCount++
 		}
 	}
 
-	parentLinkExamples := 0
+	parentLinkReadyCount := 0
 	for _, row := range parentLinkComparisons {
 		if row.Status != "ready" && row.Status != "already_rewritten" {
 			continue
@@ -569,32 +562,59 @@ func postMigratePreviewLines(imd map[string]any) []string {
 		if row.TargetParentIssueID == "" {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("Parent link update: %s Parent Link = %s -> Parent Link = %s", row.IssueKey, nonEmptyString(row.SourceParentIssueID, row.SourceParentIssueKey), nonEmptyString(row.TargetParentIssueID, row.TargetParentIssueKey)))
-		parentLinkExamples++
-		if parentLinkExamples == 2 {
-			break
+		parentLinkReadyCount++
+	}
+
+	filterCandidateCount := 0
+	filterNoCandidateCount := 0
+	filterAmbiguousCount := 0
+	if len(filterMatches) > 0 {
+		for _, row := range filterMatches {
+			switch row.Status {
+			case "matched":
+				filterCandidateCount++
+			case "not_found":
+				filterNoCandidateCount++
+			case "ambiguous":
+				filterAmbiguousCount++
+			}
+		}
+	} else {
+		seen := map[string]bool{}
+		for _, row := range filterComparisons {
+			if seen[row.SourceFilterID] {
+				continue
+			}
+			seen[row.SourceFilterID] = true
+			switch row.Status {
+			case "ready", "already_rewritten", "same_id":
+				filterCandidateCount++
+			case "not_found":
+				filterNoCandidateCount++
+			case "ambiguous":
+				filterAmbiguousCount++
+			}
 		}
 	}
 
-	filterExamples := 0
-	for _, row := range filterComparisons {
-		if row.Status != "ready" && row.Status != "already_rewritten" && row.Status != "same_id" {
-			continue
-		}
-		rewrittenClause := row.SourceClause
-		if row.SourceTeamID != "" && row.TargetTeamID != "" {
-			rewrittenClause = strings.Replace(row.SourceClause, row.SourceTeamID, row.TargetTeamID, 1)
-		}
-		lines = append(lines, fmt.Sprintf("Filter update: %s [%s] %s -> %s", row.SourceFilterName, row.SourceFilterID, row.SourceClause, rewrittenClause))
-		filterExamples++
-		if filterExamples == 2 {
-			break
+	lines := []string{}
+	if issueReadyCount > 0 {
+		lines = append(lines, fmt.Sprintf("Issue rewrites prepared: %d", issueReadyCount))
+	}
+	if parentLinkReadyCount > 0 {
+		lines = append(lines, fmt.Sprintf("Parent Link rewrites prepared: %d", parentLinkReadyCount))
+	}
+	if filterCandidateCount > 0 || filterNoCandidateCount > 0 || filterAmbiguousCount > 0 {
+		lines = append(lines, fmt.Sprintf("Filter candidates found: %d", filterCandidateCount))
+		lines = append(lines, fmt.Sprintf("Filters with no target candidate found: %d", filterNoCandidateCount))
+		if filterAmbiguousCount > 0 {
+			lines = append(lines, fmt.Sprintf("Filters with multiple target candidates: %d", filterAmbiguousCount))
 		}
 	}
 
-	if len(lines) == 0 && issueExamples == 0 && parentLinkExamples == 0 && filterExamples == 0 {
+	if len(lines) == 0 {
 		return []string{
-			"Issue, Parent Link, and filter rewrites are not generated yet.",
+			"No post-migrate rewrites are prepared yet.",
 		}
 	}
 	return lines
@@ -1072,6 +1092,34 @@ func filterComparisonRowsFromValue(value any) []PostMigrationFilterComparisonRow
 				RewrittenTargetJQL: asString(row["rewrittenTargetJql"]),
 				Status:             asString(row["status"]),
 				Reason:             asString(row["reason"]),
+			})
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func filterMatchRowsFromValue(value any) []PostMigrationFilterMatchRow {
+	switch rows := value.(type) {
+	case []PostMigrationFilterMatchRow:
+		return rows
+	case []any:
+		out := make([]PostMigrationFilterMatchRow, 0, len(rows))
+		for _, item := range rows {
+			row, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			out = append(out, PostMigrationFilterMatchRow{
+				SourceFilterID:   asString(row["sourceFilterId"]),
+				SourceFilterName: asString(row["sourceFilterName"]),
+				SourceOwner:      asString(row["sourceOwner"]),
+				TargetFilterID:   asString(row["targetFilterId"]),
+				TargetFilterName: asString(row["targetFilterName"]),
+				TargetOwner:      asString(row["targetOwner"]),
+				Status:           asString(row["status"]),
+				Reason:           asString(row["reason"]),
 			})
 		}
 		return out

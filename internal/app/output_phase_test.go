@@ -23,9 +23,10 @@ func TestPrintSummaryShowsPhaseSectionsForTypedMetadata(t *testing.T) {
 		"Pre-migrate Preview",
 		"Migrate Preview",
 		"Post-migrate Preview",
-		"Issue update: ABC-123 [Red Team] Team = 42 -> Team = 142",
-		"Parent link update: ABC-123 Parent Link = 10001 -> Parent Link = 20001",
-		`Filter update: Numeric Team Filter [10001] Team = 42 -> Team = 142`,
+		"Issue rewrites prepared: 1",
+		"Parent Link rewrites prepared: 1",
+		"Filter candidates found: 1",
+		"Filters with no target candidate found: 1",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("summary did not contain %q:\n%s", want, rendered)
@@ -57,9 +58,10 @@ func TestPrintSummaryShowsPhaseSectionsForDecodedJSONMetadata(t *testing.T) {
 		"Pre-migrate Preview",
 		"Migrate Preview",
 		"Post-migrate Preview",
-		"Issue update: ABC-123 [Red Team] Team = 42 -> Team = 142",
-		"Parent link update: ABC-123 Parent Link = 10001 -> Parent Link = 20001",
-		`Filter update: Numeric Team Filter [10001] Team = 42 -> Team = 142`,
+		"Issue rewrites prepared: 1",
+		"Parent Link rewrites prepared: 1",
+		"Filter candidates found: 1",
+		"Filters with no target candidate found: 1",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("summary did not contain %q after JSON decode:\n%s", want, rendered)
@@ -129,6 +131,10 @@ func samplePhaseReport() Report {
 				},
 				"filterComparisons": []PostMigrationFilterComparisonRow{
 					{SourceFilterID: "10001", SourceFilterName: "Numeric Team Filter", SourceClause: "Team = 42", SourceTeamID: "42", TargetTeamID: "142", Status: "ready"},
+				},
+				"filterMatches": []PostMigrationFilterMatchRow{
+					{SourceFilterID: "10001", SourceFilterName: "Numeric Team Filter", Status: "matched"},
+					{SourceFilterID: "10002", SourceFilterName: "Missing Filter", Status: "not_found"},
 				},
 				"filters": []FilterTeamClauseRow{
 					{FilterID: "10000", FilterName: "Red Filter", MatchType: "team_name", SourceTeamID: "42", SourceTeamName: "Red Team", Clause: `Team = "Red Team"`},
