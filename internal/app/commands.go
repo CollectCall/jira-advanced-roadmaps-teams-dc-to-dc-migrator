@@ -17,6 +17,23 @@ func runMigrate(cfg Config) Report {
 
 	applyPhase := (runsMigratePhase(cfg.Command, cfg.Phase) || runsPostMigratePhase(cfg.Command, cfg.Phase)) && !cfg.DryRun
 	state, findings, actions := executeMigration(cfg, applyPhase)
+	return finalizeMigrationExecutionReport(report, cfg, state, findings, actions)
+}
+
+func runPreview(cfg Config) Report {
+	report := newReport(cfg)
+	report.DryRun = true
+	report.Findings = append(report.Findings, cfg.requireCoreInputs()...)
+	if hasErrors(report.Findings) {
+		finalizeReport(&report)
+		return report
+	}
+
+	state, findings, actions := executeMigration(cfg, false)
+	return populateExecutionReport(report, state, findings, actions, "apply_preview", "Preview generated before apply mode confirmation")
+}
+
+func finalizeMigrationExecutionReport(report Report, cfg Config, state migrationState, findings []Finding, actions []Action) Report {
 	report = populateExecutionReport(report, state, findings, actions, "", "")
 	switch normalizeMigrationPhase(cfg.Phase) {
 	case phasePreMigrate:
@@ -45,19 +62,6 @@ func runMigrate(cfg Config) Report {
 	}
 	finalizeReport(&report)
 	return report
-}
-
-func runPreview(cfg Config) Report {
-	report := newReport(cfg)
-	report.DryRun = true
-	report.Findings = append(report.Findings, cfg.requireCoreInputs()...)
-	if hasErrors(report.Findings) {
-		finalizeReport(&report)
-		return report
-	}
-
-	state, findings, actions := executeMigration(cfg, false)
-	return populateExecutionReport(report, state, findings, actions, "apply_preview", "Preview generated before apply mode confirmation")
 }
 
 func runReport(cfg Config) (Report, error) {

@@ -95,7 +95,9 @@ func executeMigrationWithState(cfg Config, apply bool, state migrationState, fin
 	}
 
 	if runsPostMigratePhase(cfg.Command, cfg.Phase) {
-		findings = append(findings, preparePostMigrationTargetArtifacts(cfg, &state, nil)...)
+		if needsPostMigrationTargetArtifactsPreparation(cfg, state) {
+			findings = append(findings, preparePostMigrationTargetArtifacts(cfg, &state, nil)...)
+		}
 		execActions, execFindings := applyPostMigrationCorrections(cfg, targetClient, &state)
 		actions = append(actions, execActions...)
 		findings = append(findings, execFindings...)
@@ -234,6 +236,19 @@ func preparePostMigrationTargetArtifacts(cfg Config, state *migrationState, prog
 	}
 	findings = append(findings, preparePostMigrationTargetParentLinkArtifacts(cfg, state, progress)...)
 	return append(findings, preparePostMigrationTargetFilterArtifacts(cfg, state, progress)...)
+}
+
+func needsPostMigrationTargetArtifactsPreparation(cfg Config, state migrationState) bool {
+	if issueTeamCorrectionsInScope(cfg) && len(state.IssueTeamRows) > 0 && state.TargetIssueSnapshots == nil && state.IssueComparisons == nil {
+		return true
+	}
+	if cfg.ParentLinkInScope && len(state.ParentLinkRows) > 0 && state.TargetParentLinkSnapshots == nil && state.ParentLinkComparisons == nil {
+		return true
+	}
+	if cfg.FilterTeamIDsInScope && len(state.FilterTeamClauseRows) > 0 && state.TargetFilters == nil && state.TargetFilterSnapshots == nil && state.FilterTargetMatches == nil && state.FilterComparisons == nil {
+		return true
+	}
+	return false
 }
 
 func preparePostMigrationTargetIssueArtifacts(cfg Config, state *migrationState, progress *progressTracker) []Finding {

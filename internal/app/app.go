@@ -288,7 +288,9 @@ func runInteractiveApplyPhase(cfg Config, phase string) (Report, bool, error) {
 		printPhaseBoundary(os.Stdout, phase, "Previewing phase", []string{
 			"Building the plan for this phase. No Jira writes will be sent.",
 		})
-		preview := runPreview(previewCfg)
+		state, findings := loadMigrationState(previewCfg)
+		_, previewFindings, previewActions := executeMigrationWithState(previewCfg, false, state, findings)
+		preview := populateExecutionReport(newReport(previewCfg), state, previewFindings, previewActions, "apply_preview", "Preview generated before apply mode confirmation")
 		previewPaths, err := writeReportOutputs(previewCfg, preview)
 		if err != nil {
 			return Report{}, false, err
@@ -317,7 +319,8 @@ func runInteractiveApplyPhase(cfg Config, phase string) (Report, bool, error) {
 		printPhaseBoundary(os.Stdout, phase, "Applying phase", []string{
 			"Executing the approved writes for this phase.",
 		})
-		report := runMigrate(applyCfg)
+		state, findings, actions := executeMigrationWithState(applyCfg, true, state, findings)
+		report := finalizeMigrationExecutionReport(newReport(applyCfg), applyCfg, state, findings, actions)
 		reportPaths, err := writeReportOutputs(applyCfg, report)
 		if err != nil {
 			return Report{}, false, err

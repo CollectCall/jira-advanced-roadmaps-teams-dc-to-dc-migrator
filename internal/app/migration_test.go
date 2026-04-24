@@ -2497,6 +2497,96 @@ func TestExecuteMigrationWithStateAppliesPostMigrationCorrections(t *testing.T) 
 	}
 }
 
+func TestExecuteMigrationWithStateReusesPreparedPostMigrationIssueComparisons(t *testing.T) {
+	fieldLookups := 0
+	searchLookups := 0
+	issueFetches := 0
+	issueUpdates := 0
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/field":
+			fieldLookups++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/search":
+			searchLookups++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"startAt":0,"maxResults":500,"total":0,"issues":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issue/ABC-1":
+			issueFetches++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"10001","key":"ABC-1","fields":{"customfield_18888":[{"id":42}]}}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/rest/api/2/issue/ABC-1":
+			issueUpdates++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		Command:                "migrate",
+		Phase:                  phasePostMigrate,
+		TargetBaseURL:          server.URL,
+		TargetUsername:         "user",
+		TargetPassword:         "pass",
+		OutputDir:              t.TempDir(),
+		OutputTimestamp:        "20260424-101500",
+		IssueTeamIDsInScope:    true,
+		IssueTeamIDsInScopeSet: true,
+	}
+	state := migrationState{
+		IssueTeamRows: []IssueTeamRow{
+			{
+				IssueKey:        "ABC-1",
+				SourceTeamIDs:   "42",
+				SourceTeamNames: "Red Team",
+				TeamsFieldID:    "customfield_16604",
+			},
+		},
+		TargetIssueSnapshots: []TargetIssueSnapshotRow{},
+		IssueComparisons: []PostMigrationIssueComparisonRow{
+			{
+				IssueKey:             "ABC-1",
+				SourceTeamsFieldID:   "customfield_16604",
+				TargetTeamsFieldID:   "customfield_18888",
+				SourceTeamIDs:        "42",
+				TargetTeamIDs:        "142",
+				CurrentTargetTeamIDs: "42",
+				Status:               "ready",
+			},
+		},
+		TeamMappings: []TeamMapping{
+			{SourceTeamID: 42, TargetTeamID: "142", TargetTitle: "Red Team", Decision: "created"},
+		},
+	}
+
+	_, findings, actions := executeMigrationWithState(cfg, true, state, nil)
+	for _, finding := range findings {
+		if finding.Severity == SeverityError {
+			t.Fatalf("unexpected error finding: %#v", findings)
+		}
+	}
+
+	if fieldLookups != 0 {
+		t.Fatalf("expected prepared apply path to skip target field lookup, got %d requests", fieldLookups)
+	}
+	if searchLookups != 0 {
+		t.Fatalf("expected prepared apply path to skip target search lookup, got %d requests", searchLookups)
+	}
+	if issueFetches != 1 {
+		t.Fatalf("expected one current issue fetch during apply, got %d", issueFetches)
+	}
+	if issueUpdates != 1 {
+		t.Fatalf("expected one issue update during apply, got %d", issueUpdates)
+	}
+	if !containsAction(actions, "post_migrate_issue_update", "updated") {
+		t.Fatalf("expected post-migrate issue update action, got %#v", actions)
+	}
+}
+
 func TestExecuteMigrationWithStateAppliesPostMigrationParentLinkCorrections(t *testing.T) {
 	var updateBodies []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
