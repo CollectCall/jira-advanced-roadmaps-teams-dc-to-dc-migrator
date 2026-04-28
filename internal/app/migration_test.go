@@ -2270,6 +2270,97 @@ func TestApplyPostMigrationIssueCorrectionsSendsSingleObjectTeamFieldAsString(t 
 	}
 }
 
+func TestBuildPostMigrationIssueComparisonRowAllowsEmptyTargetTeamField(t *testing.T) {
+	row := buildPostMigrationIssueComparisonRow(
+		IssueTeamRow{
+			IssueKey:        "BL3-89224",
+			ProjectKey:      "BL3",
+			ProjectName:     "BL3",
+			ProjectType:     "software",
+			Summary:         "Demo issue",
+			TeamsFieldID:    "customfield_16604",
+			SourceTeamIDs:   "415",
+			SourceTeamNames: "BL3 TNL Gunship",
+		},
+		"customfield_18888",
+		JiraIssue{
+			Key: "BL3-89224",
+			Fields: map[string]any{
+				"summary":           "Demo issue",
+				"project":           map[string]any{"key": "BL3", "name": "BL3", "projectTypeKey": "software"},
+				"customfield_18888": nil,
+			},
+		},
+		map[string]string{"415": "1456"},
+	)
+
+	if row.Status != "ready" {
+		t.Fatalf("expected empty target Teams field to be ready for setting, got %q: %s", row.Status, row.Reason)
+	}
+	if row.TargetTeamIDs != "1456" || row.CurrentTargetTeamIDs != "" {
+		t.Fatalf("unexpected comparison row: %#v", row)
+	}
+}
+
+func TestApplyPostMigrationIssueCorrectionsSetsEmptyTargetTeamField(t *testing.T) {
+	var updateBody string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/issue/BL3-89224":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"10001","key":"BL3-89224","fields":{"customfield_18888":null}}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/rest/api/2/issue/BL3-89224":
+			data, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read update body: %v", err)
+			}
+			updateBody = string(data)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	state := migrationState{
+		TeamMappings: []TeamMapping{
+			{SourceTeamID: 415, TargetTeamID: "1456", Decision: "merge"},
+		},
+		IssueTeamRows: []IssueTeamRow{
+			{IssueKey: "BL3-89224", ProjectKey: "BL3", SourceTeamIDs: "415", TeamsFieldID: "customfield_16604"},
+		},
+		IssueComparisons: []PostMigrationIssueComparisonRow{
+			{
+				IssueKey:           "BL3-89224",
+				ProjectKey:         "BL3",
+				SourceTeamsFieldID: "customfield_16604",
+				TargetTeamsFieldID: "customfield_18888",
+				SourceTeamIDs:      "415",
+				TargetTeamIDs:      "1456",
+				Status:             "ready",
+			},
+		},
+	}
+
+	_, findings, results := applyPostMigrationIssueCorrections(Config{}, client, &state, &progressTask{})
+	for _, finding := range findings {
+		if finding.Severity == SeverityError || finding.Severity == SeverityWarning {
+			t.Fatalf("unexpected finding: %#v", findings)
+		}
+	}
+	if len(results) != 1 || results[0].Status != "updated" {
+		t.Fatalf("expected one updated result, got %#v", results)
+	}
+	if !strings.Contains(updateBody, `"customfield_18888":"1456"`) {
+		t.Fatalf("expected empty team field update payload to set the mapped team ID, got %s", updateBody)
+	}
+}
+
 func TestApplyPostMigrationIssueCorrectionsSkipsRowsOutsideCurrentProjectScope(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

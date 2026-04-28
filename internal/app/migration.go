@@ -941,7 +941,6 @@ func buildPostMigrationIssueComparisonRow(sourceRow IssueTeamRow, targetTeamsFie
 		row.Reason = "no target issue with the same issue key was found"
 		return row
 	}
-
 	currentIDs := extractTeamFieldIDs(targetIssue.Fields[targetTeamsFieldID])
 	row.CurrentTargetTeamIDs = strings.Join(currentIDs, ",")
 
@@ -981,11 +980,13 @@ func buildPostMigrationIssueComparisonRow(sourceRow IssueTeamRow, targetTeamsFie
 		return row
 	}
 
-	for _, sourceID := range changedSourceIDs {
-		if _, ok := currentSet[sourceID]; !ok {
-			row.Status = "source_team_ids_not_found_in_target_issue"
-			row.Reason = "the current target issue Teams field does not contain all source team IDs that need rewriting"
-			return row
+	if len(currentIDs) > 0 {
+		for _, sourceID := range changedSourceIDs {
+			if _, ok := currentSet[sourceID]; !ok {
+				row.Status = "source_team_ids_not_found_in_target_issue"
+				row.Reason = "the current target issue Teams field does not contain all source team IDs that need rewriting"
+				return row
+			}
 		}
 	}
 
@@ -2436,7 +2437,6 @@ func applyPostMigrationIssueCorrections(cfg Config, client *jiraClient, state *m
 			findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_fetch_failed", fmt.Sprintf("Could not fetch target issue %s before applying corrections: %v", comparison.IssueKey, err)))
 			continue
 		}
-
 		raw := targetIssue.Fields[comparison.TargetTeamsFieldID]
 		currentIDs := extractTeamFieldIDs(raw)
 		result.CurrentTargetTeamIDs = strings.Join(currentIDs, ",")
@@ -2480,29 +2480,36 @@ func applyPostMigrationIssueCorrections(cfg Config, client *jiraClient, state *m
 			continue
 		}
 
-		missingSource := false
-		for _, sourceID := range changedSourceIDs {
-			if _, ok := currentSet[sourceID]; !ok {
-				missingSource = true
-				break
+		if len(currentIDs) > 0 {
+			missingSource := false
+			for _, sourceID := range changedSourceIDs {
+				if _, ok := currentSet[sourceID]; !ok {
+					missingSource = true
+					break
+				}
+			}
+			if missingSource {
+				result.Status = "source_team_ids_not_found_in_target_issue"
+				result.Message = "The current target issue Teams field does not contain all source team IDs that need rewriting"
+				results = append(results, result)
+				continue
 			}
 		}
-		if missingSource {
-			result.Status = "source_team_ids_not_found_in_target_issue"
-			result.Message = "The current target issue Teams field does not contain all source team IDs that need rewriting"
-			results = append(results, result)
-			continue
+
+		var updateValue any
+		if len(currentIDs) == 0 {
+			updateValue = issueTeamFieldValueFromIDs(targetIDs)
+		} else {
+			rewrittenRaw, changed := rewriteTeamFieldIDs(raw, replacements)
+			if !changed || reflect.DeepEqual(rewrittenRaw, raw) {
+				result.Status = "no_change"
+				result.Message = "Rewriting the target issue Teams field produced no change"
+				results = append(results, result)
+				continue
+			}
+			updateValue = issueTeamFieldUpdateValue(raw, rewrittenRaw)
 		}
 
-		rewrittenRaw, changed := rewriteTeamFieldIDs(raw, replacements)
-		if !changed || reflect.DeepEqual(rewrittenRaw, raw) {
-			result.Status = "no_change"
-			result.Message = "Rewriting the target issue Teams field produced no change"
-			results = append(results, result)
-			continue
-		}
-
-		updateValue := issueTeamFieldUpdateValue(raw, rewrittenRaw)
 		if err := client.UpdateIssueFields(comparison.IssueKey, map[string]any{comparison.TargetTeamsFieldID: updateValue}); err != nil {
 			result.Status = "update_failed"
 			result.Message = fmt.Sprintf("Could not update target issue: %v", err)
@@ -3004,6 +3011,14 @@ func issueTeamFieldUpdateValue(raw, rewritten any) any {
 	default:
 		return rewritten
 	}
+}
+
+func issueTeamFieldValueFromIDs(ids []string) any {
+	cleanIDs := uniqueTrimmedStrings(ids)
+	if len(cleanIDs) == 1 {
+		return cleanIDs[0]
+	}
+	return cleanIDs
 }
 
 func loadIdentityMappings(path string) (IdentityMapping, error) {
