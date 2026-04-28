@@ -846,6 +846,8 @@ func TestBuildFilterTeamClauseRowsMatchesByIDAndName(t *testing.T) {
 		{ID: 42, Title: "Red Team"},
 		{ID: 7, Title: "Blue Team"},
 		{ID: 234, Title: "Gold Team"},
+		{ID: 381, Title: "Purple Team"},
+		{ID: 426, Title: "Orange Team"},
 	}
 	filters := []JiraFilter{
 		{
@@ -879,6 +881,21 @@ func TestBuildFilterTeamClauseRowsMatchesByIDAndName(t *testing.T) {
 			ID:   "10005",
 			Name: "Unrelated Filter",
 			JQL:  `project = ABC AND Team = "Green Team"`,
+		},
+		{
+			ID:   "10006",
+			Name: "Nested Function Filter",
+			JQL:  `subtasksOf("issueFunction in issuesInEpics(\"Team in (381)\")")`,
+		},
+		{
+			ID:   "10007",
+			Name: "Portfolio Function Filter",
+			JQL:  `issueFunction in portfolioChildrenOf("team=426")`,
+		},
+		{
+			ID:   "10008",
+			Name: "Safety Text Filter",
+			JQL:  `summary ~ "team=426" AND issuekey = ABC-426 AND Sprint = 426`,
 		},
 	}
 
@@ -956,9 +973,148 @@ func TestBuildFilterTeamClauseRowsMatchesByIDAndName(t *testing.T) {
 			Clause:         `Team IN ("42", "234")`,
 			JQL:            `project = ABC AND Team IN ("42", "234")`,
 		},
+		{
+			FilterID:       "10006",
+			FilterName:     "Nested Function Filter",
+			MatchType:      "team_id",
+			ClauseValue:    "381",
+			SourceTeamID:   "381",
+			SourceTeamName: "Purple Team",
+			Clause:         "Team in (381)",
+			JQL:            `subtasksOf("issueFunction in issuesInEpics(\"Team in (381)\")")`,
+		},
+		{
+			FilterID:       "10007",
+			FilterName:     "Portfolio Function Filter",
+			MatchType:      "team_id",
+			ClauseValue:    "426",
+			SourceTeamID:   "426",
+			SourceTeamName: "Orange Team",
+			Clause:         "team=426",
+			JQL:            `issueFunction in portfolioChildrenOf("team=426")`,
+		},
 	}
 	if !reflect.DeepEqual(rows, want) {
 		t.Fatalf("unexpected rows:\nwant: %#v\ngot:  %#v", want, rows)
+	}
+}
+
+func TestExtractTeamClauseMatchesKeepsValidQuotedAndFunctionClauses(t *testing.T) {
+	tests := []struct {
+		name string
+		jql  string
+		want []teamClauseMatch
+	}{
+		{
+			name: "top-level quoted field",
+			jql:  `project = MIG AND "Team" = 42`,
+			want: []teamClauseMatch{{clause: `"Team" = 42`, value: "42"}},
+		},
+		{
+			name: "top-level quoted numeric value",
+			jql:  `project = MIG AND Team = "42"`,
+			want: []teamClauseMatch{{clause: `Team = "42"`, value: "42"}},
+		},
+		{
+			name: "top-level quoted field and quoted in values",
+			jql:  `project = MIG AND "Team" in ("42", "234")`,
+			want: []teamClauseMatch{
+				{clause: `"Team" in ("42", "234")`, value: "42"},
+				{clause: `"Team" in ("42", "234")`, value: "234"},
+			},
+		},
+		{
+			name: "custom field clause",
+			jql:  `project = MIG AND cf[10006] = 42`,
+			want: []teamClauseMatch{{clause: `cf[10006] = 42`, value: "42"}},
+		},
+		{
+			name: "function argument compact equals",
+			jql:  `issueFunction in portfolioChildrenOf("team=426")`,
+			want: []teamClauseMatch{{clause: `team=426`, value: "426"}},
+		},
+		{
+			name: "function argument with leading query",
+			jql:  `issueFunction in subtasksOf("project = MIG AND team=426")`,
+			want: []teamClauseMatch{{clause: `team=426`, value: "426"}},
+		},
+		{
+			name: "single-quoted function argument",
+			jql:  `issueFunction in portfolioChildrenOf('team=426')`,
+			want: []teamClauseMatch{{clause: `team=426`, value: "426"}},
+		},
+		{
+			name: "nested escaped function argument",
+			jql:  `issueFunction in subtasksOf("issueFunction in issuesInEpics(\"Team in (381)\")")`,
+			want: []teamClauseMatch{{clause: `Team in (381)`, value: "381"}},
+		},
+		{
+			name: "nested escaped single quote function argument",
+			jql:  `issueFunction in subtasksOf('issueFunction in issuesInEpics(\'Team in (381)\')')`,
+			want: []teamClauseMatch{{clause: `Team in (381)`, value: "381"}},
+		},
+		{
+			name: "multiple team clauses in one function argument",
+			jql:  `issueFunction in portfolioChildrenOf("team=424 OR team=426")`,
+			want: []teamClauseMatch{
+				{clause: `team=424`, value: "424"},
+				{clause: `team=426`, value: "426"},
+			},
+		},
+		{
+			name: "uppercase compact equals",
+			jql:  `project = MIG AND TEAM=424`,
+			want: []teamClauseMatch{{clause: `TEAM=424`, value: "424"}},
+		},
+		{
+			name: "quoted plural field in list",
+			jql:  `project = MIG AND "Teams" IN (424, 426)`,
+			want: []teamClauseMatch{
+				{clause: `"Teams" IN (424, 426)`, value: "424"},
+				{clause: `"Teams" IN (424, 426)`, value: "426"},
+			},
+		},
+		{
+			name: "mixed hierarchy function and top-level clauses",
+			jql:  `Project in ("MIG", "INIT") AND (issueFunction in portfolioParentsOf("team=1458 ") OR issueFunction in portfolioChildrenOf("team=424") OR team = 1458)`,
+			want: []teamClauseMatch{
+				{clause: `team=1458`, value: "1458"},
+				{clause: `team=424`, value: "424"},
+				{clause: `team = 1458`, value: "1458"},
+			},
+		},
+		{
+			name: "text search inside function argument is skipped but team clause remains",
+			jql:  `issueFunction in subtasksOf("summary ~ \"team=426\" AND team=424")`,
+			want: []teamClauseMatch{{clause: `team=424`, value: "424"}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractTeamClauseMatches(tt.jql)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("unexpected matches:\nwant: %#v\ngot:  %#v", tt.want, got)
+			}
+		})
+	}
+}
+
+func TestExtractTeamClauseMatchesSkipsQuotedTextSearch(t *testing.T) {
+	tests := []string{
+		`summary ~ "team=426" AND issuekey = ABC-426`,
+		`description ~ 'Team in (381)' AND project = MIG`,
+		`comment ~ "cf[10006] = 42" AND Sprint = 42`,
+		`summary ~ "cf[10006] in (424,426)" AND project = MIG`,
+		`summary ~ "prefix team=426 suffix" AND labels = team-review`,
+	}
+
+	for _, jql := range tests {
+		t.Run(jql, func(t *testing.T) {
+			if got := extractTeamClauseMatches(jql); len(got) != 0 {
+				t.Fatalf("expected no matches, got %#v", got)
+			}
+		})
 	}
 }
 
@@ -1059,6 +1215,245 @@ func TestBuildPostMigrationFilterRewritePlansRewritesTeamINClauseWithoutCascadin
 	}
 }
 
+func TestBuildPostMigrationFilterRewritePlansRewritesChainedIDsWithoutCascading(t *testing.T) {
+	rows := []PostMigrationFilterComparisonRow{
+		{
+			SourceFilterID:   "10000",
+			SourceFilterName: "Team IN Filter",
+			SourceJQL:        `project = ABC AND Team IN (42, 142)`,
+			SourceClause:     `Team IN (42, 142)`,
+			SourceTeamID:     "42",
+			TargetFilterID:   "20000",
+			TargetFilterName: "Team IN Filter",
+			TargetTeamID:     "142",
+			CurrentTargetJQL: `project = ABC AND Team IN (42, 142)`,
+			Status:           "ready",
+		},
+		{
+			SourceFilterID:   "10000",
+			SourceFilterName: "Team IN Filter",
+			SourceJQL:        `project = ABC AND Team IN (42, 142)`,
+			SourceClause:     `Team IN (42, 142)`,
+			SourceTeamID:     "142",
+			TargetFilterID:   "20000",
+			TargetFilterName: "Team IN Filter",
+			TargetTeamID:     "999",
+			CurrentTargetJQL: `project = ABC AND Team IN (42, 142)`,
+			Status:           "ready",
+		},
+	}
+	filters := map[string]JiraFilter{
+		"20000": {
+			ID:   "20000",
+			Name: "Team IN Filter",
+			JQL:  `project = ABC AND Team IN (42, 142)`,
+		},
+	}
+
+	plans := buildPostMigrationFilterRewritePlans(rows, filters)
+	if len(plans) != 1 {
+		t.Fatalf("expected 1 plan, got %d", len(plans))
+	}
+	if plans[0].Status != "ready" {
+		t.Fatalf("expected ready plan, got %q: %s", plans[0].Status, plans[0].Message)
+	}
+	if plans[0].RewrittenTargetJQL != `project = ABC AND Team IN (142, 999)` {
+		t.Fatalf("unexpected rewritten JQL %q", plans[0].RewrittenTargetJQL)
+	}
+}
+
+func TestRewriteNumericTeamClausesInJQLHandlesNestedFunctionArguments(t *testing.T) {
+	tests := []struct {
+		name         string
+		jql          string
+		replacements map[string]string
+		want         string
+	}{
+		{
+			name:         "subquery in subquery",
+			jql:          `subtasksOf("issueFunction in issuesInEpics(\"Team in (381)\")")`,
+			replacements: map[string]string{"381": "9381"},
+			want:         `subtasksOf("issueFunction in issuesInEpics(\"Team in (9381)\")")`,
+		},
+		{
+			name:         "portfolio child compact equals",
+			jql:          `portfolioChildrenOf("team=426")`,
+			replacements: map[string]string{"426": "9426"},
+			want:         `portfolioChildrenOf("team=9426")`,
+		},
+		{
+			name:         "issue function portfolio child compact equals",
+			jql:          `issueFunction in portfolioChildrenOf("team=424")`,
+			replacements: map[string]string{"424": "9424"},
+			want:         `issueFunction in portfolioChildrenOf("team=9424")`,
+		},
+		{
+			name: "multiple team clauses in one function argument",
+			jql:  `issueFunction in portfolioChildrenOf("team=424 OR team=426")`,
+			replacements: map[string]string{
+				"424": "9424",
+				"426": "9426",
+			},
+			want: `issueFunction in portfolioChildrenOf("team=9424 OR team=9426")`,
+		},
+		{
+			name:         "uppercase compact equals",
+			jql:          `project = MIG AND TEAM=424`,
+			replacements: map[string]string{"424": "9424"},
+			want:         `project = MIG AND TEAM=9424`,
+		},
+		{
+			name: "quoted plural field in list",
+			jql:  `project = MIG AND "Teams" IN (424, 426)`,
+			replacements: map[string]string{
+				"424": "9424",
+				"426": "9426",
+			},
+			want: `project = MIG AND "Teams" IN (9424, 9426)`,
+		},
+		{
+			name: "mixed hierarchy filter",
+			jql:  `Project in ("PROJECT", "PROJECT ") AND (issueFunction in portfolioParentsOf("team=1458 ") OR issueFunction in portfolioChildrenOf("team=424") OR team = 1458)`,
+			replacements: map[string]string{
+				"424":  "9424",
+				"1458": "9458",
+			},
+			want: `Project in ("PROJECT", "PROJECT ") AND (issueFunction in portfolioParentsOf("team=9458 ") OR issueFunction in portfolioChildrenOf("team=9424") OR team = 9458)`,
+		},
+		{
+			name:         "quoted team field and quoted numeric value",
+			jql:          `project = ABC AND "Team" = "42"`,
+			replacements: map[string]string{"42": "1042"},
+			want:         `project = ABC AND "Team" = "1042"`,
+		},
+		{
+			name:         "custom field in list",
+			jql:          `cf[16604] in (42, "234", ABC-123) AND issuekey = ABC-42`,
+			replacements: map[string]string{"42": "1042", "234": "1234"},
+			want:         `cf[16604] in (1042, "1234", ABC-123) AND issuekey = ABC-42`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, changed := rewriteNumericTeamClausesInJQL(tt.jql, tt.replacements)
+			if !changed {
+				t.Fatal("expected rewrite to report a change")
+			}
+			if got != tt.want {
+				t.Fatalf("unexpected rewritten JQL:\nwant: %s\ngot:  %s", tt.want, got)
+			}
+		})
+	}
+}
+
+func TestRewriteNumericTeamClausesInJQLDoesNotRewriteUnrelatedNumbers(t *testing.T) {
+	jql := `summary ~ "team=426" AND project = ABC42 AND issuekey = ABC-426 AND Sprint = 426`
+	got, changed := rewriteNumericTeamClausesInJQL(jql, map[string]string{"426": "9426"})
+	if changed {
+		t.Fatalf("expected no rewrite, got %q", got)
+	}
+	if got != jql {
+		t.Fatalf("unexpected JQL mutation:\nwant: %s\ngot:  %s", jql, got)
+	}
+}
+
+func TestBuildPostMigrationFilterRewritePlansRewritesCustomerPortfolioClauses(t *testing.T) {
+	rows := []PostMigrationFilterComparisonRow{
+		{
+			SourceFilterID:   "10000",
+			SourceFilterName: "Portfolio Filter",
+			SourceJQL:        `portfolioChildrenOf("team=426")`,
+			SourceClause:     `team=426`,
+			SourceTeamID:     "426",
+			TargetFilterID:   "20000",
+			TargetFilterName: "Portfolio Filter",
+			TargetTeamID:     "9426",
+			CurrentTargetJQL: `portfolioChildrenOf("team = 426")`,
+			Status:           "ready",
+		},
+	}
+	filters := map[string]JiraFilter{
+		"20000": {
+			ID:   "20000",
+			Name: "Portfolio Filter",
+			JQL:  `portfolioChildrenOf("team = 426")`,
+		},
+	}
+
+	plans := buildPostMigrationFilterRewritePlans(rows, filters)
+	if len(plans) != 1 {
+		t.Fatalf("expected 1 plan, got %d", len(plans))
+	}
+	if plans[0].Status != "ready" {
+		t.Fatalf("expected ready plan, got %q: %s", plans[0].Status, plans[0].Message)
+	}
+	if plans[0].RewrittenTargetJQL != `portfolioChildrenOf("team = 9426")` {
+		t.Fatalf("unexpected rewritten JQL %q", plans[0].RewrittenTargetJQL)
+	}
+}
+
+func TestBuildPostMigrationFilterRewritePlansCombinesCustomerHierarchyClauses(t *testing.T) {
+	currentJQL := `Project in ("MIG", "INIT") AND (issueFunction in portfolioParentsOf("team=1458 ") OR issueFunction in portfolioChildrenOf("team=424") OR team = 1458)`
+	rows := []PostMigrationFilterComparisonRow{
+		{
+			SourceFilterID:   "10000",
+			SourceFilterName: "Portfolio Hierarchy Filter",
+			SourceJQL:        currentJQL,
+			SourceClause:     `team=1458`,
+			SourceTeamID:     "1458",
+			TargetFilterID:   "20000",
+			TargetFilterName: "Portfolio Hierarchy Filter",
+			TargetTeamID:     "9458",
+			CurrentTargetJQL: currentJQL,
+			Status:           "ready",
+		},
+		{
+			SourceFilterID:   "10000",
+			SourceFilterName: "Portfolio Hierarchy Filter",
+			SourceJQL:        currentJQL,
+			SourceClause:     `team=424`,
+			SourceTeamID:     "424",
+			TargetFilterID:   "20000",
+			TargetFilterName: "Portfolio Hierarchy Filter",
+			TargetTeamID:     "9424",
+			CurrentTargetJQL: currentJQL,
+			Status:           "ready",
+		},
+		{
+			SourceFilterID:   "10000",
+			SourceFilterName: "Portfolio Hierarchy Filter",
+			SourceJQL:        currentJQL,
+			SourceClause:     `team = 1458`,
+			SourceTeamID:     "1458",
+			TargetFilterID:   "20000",
+			TargetFilterName: "Portfolio Hierarchy Filter",
+			TargetTeamID:     "9458",
+			CurrentTargetJQL: currentJQL,
+			Status:           "ready",
+		},
+	}
+	filters := map[string]JiraFilter{
+		"20000": {
+			ID:   "20000",
+			Name: "Portfolio Hierarchy Filter",
+			JQL:  currentJQL,
+		},
+	}
+
+	plans := buildPostMigrationFilterRewritePlans(rows, filters)
+	if len(plans) != 1 {
+		t.Fatalf("expected 1 plan, got %d", len(plans))
+	}
+	if plans[0].Status != "ready" {
+		t.Fatalf("expected ready plan, got %q: %s", plans[0].Status, plans[0].Message)
+	}
+	want := `Project in ("MIG", "INIT") AND (issueFunction in portfolioParentsOf("team=9458 ") OR issueFunction in portfolioChildrenOf("team=9424") OR team = 9458)`
+	if plans[0].RewrittenTargetJQL != want {
+		t.Fatalf("unexpected rewritten JQL:\nwant: %s\ngot:  %s", want, plans[0].RewrittenTargetJQL)
+	}
+}
+
 func TestBuildPostMigrationFilterComparisonRowDetectsAlreadyRewrittenNumericClause(t *testing.T) {
 	row := buildPostMigrationFilterComparisonRow(FilterTeamClauseRow{
 		FilterID:     "10000",
@@ -1089,6 +1484,73 @@ func TestBuildPostMigrationFilterComparisonRowDetectsAlreadyRewrittenNumericClau
 	}
 	if plans[0].Status != "already_rewritten" {
 		t.Fatalf("expected already_rewritten plan, got %q: %s", plans[0].Status, plans[0].Message)
+	}
+}
+
+func TestBuildPostMigrationFilterComparisonRowDetectsAlreadyRewrittenPortfolioClauseWithChangedSpacing(t *testing.T) {
+	row := buildPostMigrationFilterComparisonRow(FilterTeamClauseRow{
+		FilterID:     "10000",
+		FilterName:   "Portfolio Filter",
+		Owner:        "Jane Doe",
+		Clause:       "team=426",
+		SourceTeamID: "426",
+		JQL:          `issueFunction in portfolioChildrenOf("team=426")`,
+	}, JiraFilter{
+		ID:    "9001",
+		Name:  "Portfolio Filter",
+		Owner: &JiraFilterUser{DisplayName: "Jane Doe"},
+		JQL:   `issueFunction in portfolioChildrenOf("team = 16")`,
+	}, map[string]string{"426": "16"})
+
+	if row.Status != "already_rewritten" {
+		t.Fatalf("expected already_rewritten row, got %q: %s", row.Status, row.Reason)
+	}
+	if row.RewrittenTargetJQL != `issueFunction in portfolioChildrenOf("team = 16")` {
+		t.Fatalf("unexpected rewritten target JQL %q", row.RewrittenTargetJQL)
+	}
+}
+
+func TestBuildPostMigrationFilterComparisonRowsRewriteNormalizedTargetClause(t *testing.T) {
+	matchRows, comparisonRows := buildPostMigrationFilterMatchAndComparisonRows(
+		[]FilterTeamClauseRow{
+			{
+				FilterID:     "10000",
+				FilterName:   "Portfolio Filter",
+				Owner:        "Jane Doe",
+				MatchType:    "team_id",
+				Clause:       "team=426",
+				SourceTeamID: "426",
+				JQL:          `issueFunction in portfolioChildrenOf("team=426")`,
+			},
+		},
+		map[string][]JiraFilter{
+			"10000": {
+				{ID: "20000", Name: "Portfolio Filter", Owner: &JiraFilterUser{DisplayName: "Jane Doe"}},
+			},
+		},
+		map[string]JiraFilter{
+			"20000": {
+				ID:    "20000",
+				Name:  "Portfolio Filter",
+				Owner: &JiraFilterUser{DisplayName: "Jane Doe"},
+				JQL:   `issueFunction in portfolioChildrenOf("team = 426")`,
+			},
+		},
+		[]TeamMapping{{SourceTeamID: 426, SourceTitle: "Orange Team", TargetTeamID: "9426", TargetTitle: "Orange Team", Decision: "merge"}},
+	)
+
+	if len(matchRows) != 1 || matchRows[0].Status != "matched" {
+		t.Fatalf("expected matched target filter, got %#v", matchRows)
+	}
+	if len(comparisonRows) != 1 {
+		t.Fatalf("expected 1 comparison row, got %d", len(comparisonRows))
+	}
+	row := comparisonRows[0]
+	if row.Status != "ready" {
+		t.Fatalf("expected ready comparison row, got %q: %s", row.Status, row.Reason)
+	}
+	if row.RewrittenTargetJQL != `issueFunction in portfolioChildrenOf("team = 9426")` {
+		t.Fatalf("unexpected rewritten target JQL %q", row.RewrittenTargetJQL)
 	}
 }
 

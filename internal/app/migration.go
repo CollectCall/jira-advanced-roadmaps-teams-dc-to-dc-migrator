@@ -1197,10 +1197,11 @@ func buildPostMigrationFilterComparisonRow(sourceRow FilterTeamClauseRow, target
 		return row
 	}
 
-	rewrittenClause := rewriteTeamIDNumericLiterals(sourceRow.Clause, map[string]string{sourceRow.SourceTeamID: targetTeamID})
-	rewrittenJQL, found := replaceFirstLiteralFold(targetFilter.JQL, sourceRow.Clause, rewrittenClause)
-	if !found {
-		if containsLiteralFold(targetFilter.JQL, rewrittenClause) {
+	replacements := map[string]string{sourceRow.SourceTeamID: targetTeamID}
+	rewrittenClause := rewriteTeamIDNumericLiterals(sourceRow.Clause, replacements)
+	rewrittenJQL, changed := rewriteNumericTeamClausesInJQL(targetFilter.JQL, replacements)
+	if !changed {
+		if containsLiteralFold(targetFilter.JQL, rewrittenClause) || jqlHasNumericTeamClauseID(targetFilter.JQL, targetTeamID) {
 			row.Status = "already_rewritten"
 			row.RewrittenTargetJQL = targetFilter.JQL
 			row.Reason = "the target filter already contains the mapped destination team ID"
@@ -2837,11 +2838,11 @@ func buildPostMigrationFilterRewritePlans(rows []PostMigrationFilterComparisonRo
 			for _, row := range clauseGroup {
 				replacements[row.SourceTeamID] = row.TargetTeamID
 			}
-			rewrittenClause := rewriteTeamIDNumericLiterals(sourceClause, replacements)
-			if updated, ok := replaceFirstLiteralFold(rewrittenJQL, sourceClause, rewrittenClause); ok {
+			if updated, changed := rewriteNumericTeamClausesInJQL(rewrittenJQL, replacements); changed {
 				rewrittenJQL = updated
 				continue
 			}
+			rewrittenClause := rewriteTeamIDNumericLiterals(sourceClause, replacements)
 			if containsLiteralFold(rewrittenJQL, rewrittenClause) {
 				continue
 			}
@@ -2911,6 +2912,375 @@ func rewriteTeamIDNumericLiterals(value string, replacements map[string]string) 
 		}
 	}
 	return out.String()
+}
+
+func rewriteNumericTeamClausesInJQL(jql string, replacements map[string]string) (string, bool) {
+	if len(replacements) == 0 || jql == "" {
+		return jql, false
+	}
+
+	var out strings.Builder
+	out.Grow(len(jql))
+	changed := false
+	for i := 0; i < len(jql); {
+		if isInsideQuotedText(jql, i) && !isLikelyQuotedFunctionArgumentClause(jql, i) {
+			out.WriteByte(jql[i])
+			i++
+			continue
+		}
+		fieldEnd, ok := scanTeamField(jql, i)
+		if !ok {
+			out.WriteByte(jql[i])
+			i++
+			continue
+		}
+
+		operatorStart := skipASCIIWhitespace(jql, fieldEnd)
+		if operatorStart >= len(jql) {
+			out.WriteString(jql[i:])
+			break
+		}
+
+		if jql[operatorStart] == '=' {
+			valueStart := skipASCIIWhitespace(jql, operatorStart+1)
+			valueEnd, replacement, replaced := scanReplaceableNumericOperand(jql, valueStart, replacements)
+			if valueEnd == valueStart {
+				out.WriteString(jql[i:fieldEnd])
+				i = fieldEnd
+				continue
+			}
+			out.WriteString(jql[i:valueStart])
+			if replaced {
+				out.WriteString(replacement)
+				changed = true
+			} else {
+				out.WriteString(jql[valueStart:valueEnd])
+			}
+			i = valueEnd
+			continue
+		}
+
+		if !hasWordAtFold(jql, operatorStart, "in") || !isJQLWordBoundary(jql, operatorStart+2) {
+			out.WriteString(jql[i:fieldEnd])
+			i = fieldEnd
+			continue
+		}
+
+		openParen := skipASCIIWhitespace(jql, operatorStart+2)
+		if openParen >= len(jql) || jql[openParen] != '(' {
+			out.WriteString(jql[i:fieldEnd])
+			i = fieldEnd
+			continue
+		}
+
+		listEnd, rewrittenList, listChanged, ok := rewriteTeamInOperandList(jql, openParen, replacements)
+		if !ok {
+			out.WriteString(jql[i:fieldEnd])
+			i = fieldEnd
+			continue
+		}
+		out.WriteString(jql[i:openParen])
+		out.WriteString(rewrittenList)
+		changed = changed || listChanged
+		i = listEnd
+	}
+
+	return out.String(), changed
+}
+
+func jqlHasNumericTeamClauseID(jql, id string) bool {
+	if strings.TrimSpace(id) == "" {
+		return false
+	}
+	_, changed := rewriteNumericTeamClausesInJQL(jql, map[string]string{id: id})
+	return changed
+}
+
+func scanTeamField(s string, start int) (int, bool) {
+	if start >= len(s) {
+		return start, false
+	}
+	if s[start] == '"' || s[start] == '\'' {
+		quote := s[start]
+		fieldStart := start + 1
+		fieldEnd := fieldStart
+		for fieldEnd < len(s) && s[fieldEnd] != quote {
+			fieldEnd++
+		}
+		if fieldEnd >= len(s) {
+			return start, false
+		}
+		if isSupportedTeamFieldName(s[fieldStart:fieldEnd]) {
+			return fieldEnd + 1, true
+		}
+		return start, false
+	}
+
+	if !isJQLWordBoundary(s, start-1) {
+		return start, false
+	}
+	for _, field := range []string{"team", "teams"} {
+		end := start + len(field)
+		if hasWordAtFold(s, start, field) && isJQLWordBoundary(s, end) {
+			return end, true
+		}
+	}
+	if hasPrefixFold(s[start:], "cf[") {
+		end := start + 3
+		digitStart := end
+		for end < len(s) && s[end] >= '0' && s[end] <= '9' {
+			end++
+		}
+		if end > digitStart && end < len(s) && s[end] == ']' {
+			return end + 1, true
+		}
+	}
+	return start, false
+}
+
+func isSupportedTeamFieldName(field string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(field))
+	if normalized == "team" || normalized == "teams" {
+		return true
+	}
+	if len(normalized) < 5 || !strings.HasPrefix(normalized, "cf[") || normalized[len(normalized)-1] != ']' {
+		return false
+	}
+	for _, r := range normalized[3 : len(normalized)-1] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func rewriteTeamInOperandList(s string, openParen int, replacements map[string]string) (int, string, bool, bool) {
+	var out strings.Builder
+	out.WriteByte('(')
+	changed := false
+	i := openParen + 1
+	for i < len(s) {
+		switch s[i] {
+		case ')':
+			out.WriteByte(')')
+			return i + 1, out.String(), changed, true
+		case '"', '\'':
+			end, replacement, replaced := scanReplaceableNumericOperand(s, i, replacements)
+			if end == i {
+				out.WriteByte(s[i])
+				i++
+				continue
+			}
+			if replaced {
+				out.WriteString(replacement)
+				changed = true
+			} else {
+				out.WriteString(s[i:end])
+			}
+			i = end
+		default:
+			if s[i] >= '0' && s[i] <= '9' {
+				if i > openParen+1 && !isNumericTeamOperandBoundary(s[i-1]) {
+					out.WriteByte(s[i])
+					i++
+					continue
+				}
+				end, replacement, replaced := scanReplaceableNumericOperand(s, i, replacements)
+				if end == i {
+					out.WriteByte(s[i])
+					i++
+					continue
+				}
+				if replaced {
+					out.WriteString(replacement)
+					changed = true
+				} else {
+					out.WriteString(s[i:end])
+				}
+				i = end
+				continue
+			}
+			out.WriteByte(s[i])
+			i++
+		}
+	}
+	return openParen, "", false, false
+}
+
+func scanReplaceableNumericOperand(s string, start int, replacements map[string]string) (int, string, bool) {
+	if start >= len(s) {
+		return start, "", false
+	}
+	quote := byte(0)
+	digitStart := start
+	if s[start] == '"' || s[start] == '\'' {
+		quote = s[start]
+		digitStart = start + 1
+	}
+	digitEnd := digitStart
+	for digitEnd < len(s) && s[digitEnd] >= '0' && s[digitEnd] <= '9' {
+		digitEnd++
+	}
+	if digitEnd == digitStart {
+		return start, "", false
+	}
+	end := digitEnd
+	if quote != 0 {
+		if end >= len(s) || s[end] != quote {
+			return start, "", false
+		}
+		end++
+	} else if end < len(s) && !isNumericTeamOperandBoundary(s[end]) {
+		return start, "", false
+	}
+	replacement, ok := replacements[s[digitStart:digitEnd]]
+	if !ok {
+		return end, "", false
+	}
+	if quote == 0 {
+		return end, replacement, true
+	}
+	return end, string(quote) + replacement + string(quote), true
+}
+
+func skipASCIIWhitespace(s string, i int) int {
+	for i < len(s) {
+		switch s[i] {
+		case ' ', '\t', '\n', '\r', '\f':
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+func hasWordAtFold(s string, start int, word string) bool {
+	end := start + len(word)
+	return start >= 0 && end <= len(s) && strings.EqualFold(s[start:end], word)
+}
+
+func hasPrefixFold(s, prefix string) bool {
+	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
+}
+
+func isJQLWordBoundary(s string, i int) bool {
+	if i < 0 || i >= len(s) {
+		return true
+	}
+	c := s[i]
+	return !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')
+}
+
+func isNumericTeamOperandBoundary(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\r', '\f', ',', ')', '(', '"', '\'':
+		return true
+	default:
+		return false
+	}
+}
+
+func isInsideQuotedText(s string, pos int) bool {
+	var quote byte
+	escaped := false
+	for i := 0; i < pos && i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' {
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		if c == '"' || c == '\'' {
+			quote = c
+		}
+	}
+	return quote != 0
+}
+
+func isLikelyQuotedFunctionArgumentClause(s string, pos int) bool {
+	openingQuote := activeQuoteStart(s, pos)
+	if openingQuote < 0 {
+		return false
+	}
+	escapedQuote := activeEscapedQuoteStart(s, openingQuote+1, pos)
+	if escapedQuote >= 0 {
+		return quoteStartsFunctionArgument(s, escapedQuote)
+	}
+	return quoteStartsFunctionArgument(s, openingQuote)
+}
+
+func activeQuoteStart(s string, pos int) int {
+	var quote byte
+	quoteStart := -1
+	escaped := false
+	for i := 0; i < pos && i < len(s); i++ {
+		c := s[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if c == '\\' {
+			escaped = true
+			continue
+		}
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+				quoteStart = -1
+			}
+			continue
+		}
+		if c == '"' || c == '\'' {
+			quote = c
+			quoteStart = i
+		}
+	}
+	return quoteStart
+}
+
+func activeEscapedQuoteStart(s string, start, pos int) int {
+	quoteStart := -1
+	for i := start; i+1 < pos && i+1 < len(s); i++ {
+		if s[i] != '\\' || (s[i+1] != '"' && s[i+1] != '\'') {
+			continue
+		}
+		if quoteStart >= 0 {
+			quoteStart = -1
+		} else {
+			quoteStart = i + 1
+		}
+		i++
+	}
+	return quoteStart
+}
+
+func quoteStartsFunctionArgument(s string, quote int) bool {
+	i := quote - 1
+	if i >= 0 && s[i] == '\\' {
+		i--
+	}
+	for i >= 0 {
+		switch s[i] {
+		case ' ', '\t', '\n', '\r', '\f':
+			i--
+			continue
+		case '(':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 func groupReadyFilterRowsByClause(rows []PostMigrationFilterComparisonRow) [][]PostMigrationFilterComparisonRow {

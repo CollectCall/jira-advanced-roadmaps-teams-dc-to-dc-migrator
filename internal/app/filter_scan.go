@@ -40,8 +40,8 @@ type teamFilterParseError struct {
 }
 
 var (
-	teamEqualsClausePattern = regexp.MustCompile(`(?i)(?:"?teams?"?|\bteams?\b|cf\[[0-9]+\])\s*=\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_.:-]+))`)
-	teamInClausePattern     = regexp.MustCompile(`(?i)(?:"?teams?"?|\bteams?\b|cf\[[0-9]+\])\s+in\s*\(([^)]*)\)`)
+	teamEqualsClausePattern = regexp.MustCompile(`(?i)(?:"teams?"|\bteams?\b|cf\[[0-9]+\])\s*=\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_.:-]+))`)
+	teamInClausePattern     = regexp.MustCompile(`(?i)(?:"teams?"|\bteams?\b|cf\[[0-9]+\])\s+in\s*\(([^)]*)\)`)
 )
 
 type teamClauseMatch struct {
@@ -286,20 +286,30 @@ func buildFilterTeamClauseRows(filters []JiraFilter, teams []TeamDTO) []FilterTe
 
 func extractTeamClauseMatches(jql string) []teamClauseMatch {
 	matches := make([]teamClauseMatch, 0)
-	for _, match := range teamEqualsClausePattern.FindAllStringSubmatch(jql, -1) {
-		value := strings.TrimSpace(firstNonEmptyFilterValue(match[1], match[2], match[3]))
+	for _, indexes := range teamEqualsClausePattern.FindAllStringSubmatchIndex(jql, -1) {
+		if len(indexes) < 8 || shouldSkipRawTeamClauseMatch(jql, indexes[0]) {
+			continue
+		}
+		value := strings.TrimSpace(firstNonEmptyFilterValue(
+			filterSubmatchValue(jql, indexes[2], indexes[3]),
+			filterSubmatchValue(jql, indexes[4], indexes[5]),
+			filterSubmatchValue(jql, indexes[6], indexes[7]),
+		))
 		if value == "" {
 			continue
 		}
 		matches = append(matches, teamClauseMatch{
-			clause: strings.TrimSpace(match[0]),
+			clause: strings.TrimSpace(jql[indexes[0]:indexes[1]]),
 			value:  value,
 		})
 	}
 
-	for _, match := range teamInClausePattern.FindAllStringSubmatch(jql, -1) {
-		clause := strings.TrimSpace(match[0])
-		for _, value := range splitJQLListValues(match[1]) {
+	for _, indexes := range teamInClausePattern.FindAllStringSubmatchIndex(jql, -1) {
+		if len(indexes) < 4 || shouldSkipRawTeamClauseMatch(jql, indexes[0]) {
+			continue
+		}
+		clause := strings.TrimSpace(jql[indexes[0]:indexes[1]])
+		for _, value := range splitJQLListValues(filterSubmatchValue(jql, indexes[2], indexes[3])) {
 			value = strings.TrimSpace(value)
 			if value == "" {
 				continue
@@ -312,6 +322,17 @@ func extractTeamClauseMatches(jql string) []teamClauseMatch {
 	}
 
 	return matches
+}
+
+func filterSubmatchValue(s string, start, end int) string {
+	if start < 0 || end < 0 || start > end || end > len(s) {
+		return ""
+	}
+	return s[start:end]
+}
+
+func shouldSkipRawTeamClauseMatch(jql string, start int) bool {
+	return isInsideQuotedText(jql, start) && !isLikelyQuotedFunctionArgumentClause(jql, start)
 }
 
 func hasNumericTeamClause(jql string) bool {
