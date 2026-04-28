@@ -164,7 +164,7 @@ func completeConfigInteractively(cfg *Config) error {
 	}
 
 	if sourceNeedsAuth(*cfg) {
-		if err := promptForAuth(wizard, "source", &cfg.SourceUsername, &cfg.SourcePassword); err != nil {
+		if err := promptForVerifiedAuth(wizard, "source", cfg.SourceBaseURL, &cfg.SourceUsername, &cfg.SourcePassword); err != nil {
 			return err
 		}
 	}
@@ -183,7 +183,7 @@ func completeConfigInteractively(cfg *Config) error {
 		cfg.TargetBaseURL = value
 	}
 	if targetNeedsAuth(*cfg) {
-		if err := promptForAuth(wizard, "target", &cfg.TargetUsername, &cfg.TargetPassword); err != nil {
+		if err := promptForVerifiedAuth(wizard, "target", cfg.TargetBaseURL, &cfg.TargetUsername, &cfg.TargetPassword); err != nil {
 			return err
 		}
 	}
@@ -369,7 +369,7 @@ func completeMigrateSessionInteractively(cfg *Config) error {
 	}
 
 	if sourceNeedsAuth(*cfg) {
-		if err := promptForAuth(wizard, "source", &cfg.SourceUsername, &cfg.SourcePassword); err != nil {
+		if err := promptForVerifiedAuth(wizard, "source", cfg.SourceBaseURL, &cfg.SourceUsername, &cfg.SourcePassword); err != nil {
 			return err
 		}
 	}
@@ -388,7 +388,7 @@ func completeMigrateSessionInteractively(cfg *Config) error {
 		cfg.TargetBaseURL = value
 	}
 	if targetNeedsAuth(*cfg) {
-		if err := promptForAuth(wizard, "target", &cfg.TargetUsername, &cfg.TargetPassword); err != nil {
+		if err := promptForVerifiedAuth(wizard, "target", cfg.TargetBaseURL, &cfg.TargetUsername, &cfg.TargetPassword); err != nil {
 			return err
 		}
 	}
@@ -756,6 +756,55 @@ func promptForAuth(wizard *wizardContext, label string, username, password *stri
 		*password = pass
 	}
 	return nil
+}
+
+func promptForVerifiedAuth(wizard *wizardContext, label, baseURL string, username, password *string) error {
+	for {
+		if err := promptForAuth(wizard, label, username, password); err != nil {
+			return err
+		}
+
+		user, err := verifyJiraCredentials(baseURL, *username, *password)
+		if err == nil {
+			wizard.noteLines([]string{
+				fmt.Sprintf("Verified %s Jira credentials.", label),
+				fmt.Sprintf("Authenticated as %s.", jiraUserIdentity(*user)),
+			})
+			return nil
+		}
+
+		choice, choiceErr := wizard.choice(wizardField{
+			Label:       fmt.Sprintf("%s connection test failed", titleCase(label)),
+			Description: fmt.Sprintf("Could not authenticate against the %s Jira instance.", label),
+			InputHelp:   "Choose retry credentials to enter a new username/password, or cancel to stop this run.",
+			ArtifactInfo: fmt.Sprintf(
+				"Connection test: GET %s/rest/api/2/myself. Error: %v",
+				strings.TrimRight(normalizeInstanceBaseURL(baseURL), "/"),
+				err,
+			),
+			Default: "retry credentials",
+		}, []string{"retry credentials", "cancel"})
+		if choiceErr != nil {
+			return choiceErr
+		}
+		if choice == "cancel" {
+			return fmt.Errorf("%s Jira credential verification cancelled: %w", label, err)
+		}
+		*username = ""
+		*password = ""
+	}
+}
+
+func verifyJiraCredentials(baseURL, username, password string) (*CoreJiraUser, error) {
+	client, err := newJiraClient(baseURL, username, password)
+	if err != nil {
+		return nil, err
+	}
+	user, err := client.CurrentUser()
+	if err != nil {
+		return nil, err
+	}
+	return user, nil
 }
 
 func newWizard(title, subtitle string) *wizardContext {
