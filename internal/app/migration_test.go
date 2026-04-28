@@ -1223,6 +1223,81 @@ func TestWritePostMigrationIssueTeamExportWritesCSV(t *testing.T) {
 	}
 }
 
+func TestWritePostMigrationIssueTeamExportFiltersCurrentProjectScope(t *testing.T) {
+	cfg := Config{OutputDir: t.TempDir(), OutputTimestamp: "20260420-113500", IssueProjectScope: "ABC"}
+	rows := []IssueTeamRow{
+		{
+			IssueKey:      "ABC-123",
+			ProjectKey:    "ABC",
+			Summary:       "In scope",
+			SourceTeamIDs: "42",
+			TeamsFieldID:  "customfield_10010",
+		},
+		{
+			IssueKey:      "OUT-123",
+			ProjectKey:    "OUT",
+			Summary:       "Out of scope",
+			SourceTeamIDs: "42",
+			TeamsFieldID:  "customfield_10010",
+		},
+	}
+	mappings := []TeamMapping{{SourceTeamID: 42, TargetTeamID: "1042", Decision: "created"}}
+
+	path, err := writePostMigrationIssueTeamExport(cfg, rows, mappings)
+	if err != nil {
+		t.Fatalf("writePostMigrationIssueTeamExport returned error: %v", err)
+	}
+
+	records := readCSVRecords(t, path)
+	want := [][]string{
+		{"Issue Key", "Project Key", "Project Name", "Project Type", "Summary", "Source Team IDs", "Source Team Names", "Teams Field ID", "Target Team IDs"},
+		{"ABC-123", "ABC", "", "", "In scope", "42", "", "customfield_10010", "1042"},
+	}
+	if !reflect.DeepEqual(records, want) {
+		t.Fatalf("unexpected scoped post-migration issue mapping CSV:\nwant: %#v\ngot:  %#v", want, records)
+	}
+}
+
+func TestWritePostMigrationParentLinkExportFiltersCurrentProjectScope(t *testing.T) {
+	cfg := Config{OutputDir: t.TempDir(), OutputTimestamp: "20260420-113700", IssueProjectScope: "ABC"}
+	rows := []ParentLinkRow{
+		{
+			IssueKey:               "ABC-123",
+			IssueID:                "10001",
+			ProjectKey:             "ABC",
+			Summary:                "In scope",
+			ParentLinkFieldID:      "customfield_16605",
+			SourceParentIssueID:    "5001",
+			SourceParentIssueKey:   "INIT-1",
+			SourceParentProjectKey: "INIT",
+		},
+		{
+			IssueKey:               "OUT-123",
+			IssueID:                "10002",
+			ProjectKey:             "OUT",
+			Summary:                "Out of scope",
+			ParentLinkFieldID:      "customfield_16605",
+			SourceParentIssueID:    "5001",
+			SourceParentIssueKey:   "INIT-1",
+			SourceParentProjectKey: "INIT",
+		},
+	}
+
+	path, err := writePostMigrationParentLinkExport(cfg, rows)
+	if err != nil {
+		t.Fatalf("writePostMigrationParentLinkExport returned error: %v", err)
+	}
+
+	records := readCSVRecords(t, path)
+	want := [][]string{
+		{"Issue Key", "Issue ID", "Project Key", "Project Name", "Project Type", "Summary", "Parent Link Field ID", "Source Parent Issue ID", "Source Parent Issue Key", "Source Parent Summary", "Source Parent Project Key", "Target Parent Issue Key", "Target Parent Issue ID"},
+		{"ABC-123", "10001", "ABC", "", "", "In scope", "customfield_16605", "5001", "INIT-1", "", "INIT", "INIT-1", ""},
+	}
+	if !reflect.DeepEqual(records, want) {
+		t.Fatalf("unexpected scoped post-migration parent-link mapping CSV:\nwant: %#v\ngot:  %#v", want, records)
+	}
+}
+
 func TestWritePostMigrationFilterTeamExportWritesCSV(t *testing.T) {
 	cfg := Config{OutputDir: t.TempDir(), OutputTimestamp: "20260420-114500"}
 	rows := []FilterTeamClauseRow{

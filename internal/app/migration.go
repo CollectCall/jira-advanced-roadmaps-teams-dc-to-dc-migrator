@@ -146,7 +146,8 @@ func preparePostMigrationCorrectionArtifacts(cfg Config, state *migrationState) 
 			}
 		}
 		if len(state.IssueTeamRows) > 0 {
-			exportPath, err := writePostMigrationIssueTeamExport(cfg, state.IssueTeamRows, state.TeamMappings)
+			rows := issueTeamRowsInProjectScope(state.IssueTeamRows, cfg.IssueProjectScope)
+			exportPath, err := writePostMigrationIssueTeamExport(cfg, rows, state.TeamMappings)
 			if err != nil {
 				findings = append(findings, newFinding(SeverityWarning, "migration_issue_mapping_export_failed", err.Error()))
 			} else if exportPath != "" {
@@ -154,7 +155,7 @@ func preparePostMigrationCorrectionArtifacts(cfg Config, state *migrationState) 
 					Key:   "post_migrate_issue_team_mapping",
 					Label: "Post-migration issue/team mapping",
 					Path:  exportPath,
-					Count: len(state.IssueTeamRows),
+					Count: len(rows),
 				}
 				state.Artifacts = replaceArtifact(state.Artifacts, artifact)
 				actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
@@ -177,7 +178,8 @@ func preparePostMigrationCorrectionArtifacts(cfg Config, state *migrationState) 
 			}
 		}
 		if len(state.ParentLinkRows) > 0 {
-			exportPath, err := writePostMigrationParentLinkExport(cfg, state.ParentLinkRows)
+			rows := parentLinkRowsInProjectScope(state.ParentLinkRows, cfg.IssueProjectScope)
+			exportPath, err := writePostMigrationParentLinkExport(cfg, rows)
 			if err != nil {
 				findings = append(findings, newFinding(SeverityWarning, "migration_parent_link_export_failed", err.Error()))
 			} else if exportPath != "" {
@@ -185,7 +187,7 @@ func preparePostMigrationCorrectionArtifacts(cfg Config, state *migrationState) 
 					Key:   "post_migrate_parent_link_mapping",
 					Label: "Post-migration parent-link mapping",
 					Path:  exportPath,
-					Count: len(state.ParentLinkRows),
+					Count: len(rows),
 				}
 				state.Artifacts = replaceArtifact(state.Artifacts, artifact)
 				actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
@@ -3148,6 +3150,7 @@ func teamIDMappingRows(mappings []TeamMapping) [][]string {
 }
 
 func writePostMigrationIssueTeamExport(cfg Config, rows []IssueTeamRow, mappings []TeamMapping) (string, error) {
+	rows = issueTeamRowsInProjectScope(rows, cfg.IssueProjectScope)
 	if len(rows) == 0 {
 		return "", nil
 	}
@@ -3239,6 +3242,7 @@ func writePostMigrationIssueUpdateResultsExport(cfg Config, rows []PostMigration
 }
 
 func writePostMigrationParentLinkExport(cfg Config, rows []ParentLinkRow) (string, error) {
+	rows = parentLinkRowsInProjectScope(rows, cfg.IssueProjectScope)
 	if len(rows) == 0 {
 		return "", nil
 	}
