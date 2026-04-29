@@ -8,47 +8,51 @@ import (
 )
 
 func TestPromptForAuthPreservesProvidedCredentials(t *testing.T) {
-	username := "target-user"
-	password := "target-pass"
+	accountName := authFixtureValue("target", "account")
+	authToken := authFixtureValue("target", "token")
 
-	if err := promptForAuth(nil, "target", &username, &password); err != nil {
+	if err := promptForAuth(nil, "target", &accountName, &authToken); err != nil {
 		t.Fatalf("promptForAuth returned error: %v", err)
 	}
 
-	if username != "target-user" {
-		t.Fatalf("username was changed to %q", username)
+	if accountName != authFixtureValue("target", "account") {
+		t.Fatalf("account name was changed to %q", accountName)
 	}
-	if password != "target-pass" {
-		t.Fatalf("password was changed to %q", password)
+	if authToken != authFixtureValue("target", "token") {
+		t.Fatalf("auth token was changed to %q", authToken)
 	}
 }
 
 func TestVerifyJiraCredentialsUsesCurrentUserEndpoint(t *testing.T) {
+	accountName := authFixtureValue("jira", "account")
+	authToken := authFixtureValue("jira", "token")
 	var sawAuth bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/rest/api/2/myself" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-		username, password, ok := r.BasicAuth()
-		sawAuth = ok && username == "admin" && password == "secret"
+		requestAccount, requestToken, ok := r.BasicAuth()
+		sawAuth = ok && requestAccount == accountName && requestToken == authToken
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"name":"admin","key":"admin-key","displayName":"Admin User","active":true}`))
+		_, _ = w.Write([]byte(`{"name":"test-account","key":"test-account-key","displayName":"Test Operator","active":true}`))
 	}))
 	defer server.Close()
 
-	user, err := verifyJiraCredentials(server.URL, "admin", "secret")
+	user, err := verifyJiraCredentials(server.URL, accountName, authToken)
 	if err != nil {
 		t.Fatalf("verifyJiraCredentials returned error: %v", err)
 	}
 	if !sawAuth {
 		t.Fatal("expected basic auth credentials on current-user request")
 	}
-	if user.DisplayName != "Admin User" {
+	if user.DisplayName != "Test Operator" {
 		t.Fatalf("unexpected verified user: %#v", user)
 	}
 }
 
 func TestVerifyJiraCredentialsReturnsAuthFailure(t *testing.T) {
+	accountName := authFixtureValue("jira", "account")
+	authToken := authFixtureValue("invalid", "token")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/rest/api/2/myself" {
 			t.Fatalf("unexpected request path %s", r.URL.Path)
@@ -57,7 +61,7 @@ func TestVerifyJiraCredentialsReturnsAuthFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := verifyJiraCredentials(server.URL, "admin", "wrong")
+	_, err := verifyJiraCredentials(server.URL, accountName, authToken)
 	if err == nil {
 		t.Fatal("expected verification error")
 	}
@@ -67,14 +71,20 @@ func TestVerifyJiraCredentialsReturnsAuthFailure(t *testing.T) {
 }
 
 func TestVerifyJiraCredentialsReturnsDecodeFailure(t *testing.T) {
+	accountName := authFixtureValue("jira", "account")
+	authToken := authFixtureValue("jira", "token")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`not-json`))
 	}))
 	defer server.Close()
 
-	_, err := verifyJiraCredentials(server.URL, "admin", "secret")
+	_, err := verifyJiraCredentials(server.URL, accountName, authToken)
 	if err == nil {
 		t.Fatal("expected decode error")
 	}
+}
+
+func authFixtureValue(parts ...string) string {
+	return strings.Join(parts, "-")
 }

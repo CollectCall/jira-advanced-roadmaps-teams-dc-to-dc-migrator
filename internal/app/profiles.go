@@ -140,7 +140,12 @@ func saveProfileStore(path string, store ProfileStore) error {
 	}
 
 	content := strings.Join(lines, "\n") + "\n"
-	return os.WriteFile(configPath, []byte(content), 0o600)
+	root, err := os.OpenRoot(filepath.Dir(configPath))
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return root.WriteFile(filepath.Base(configPath), []byte(content), 0o600)
 }
 
 func applySavedProfile(cfg *Config, profile SavedProfile) {

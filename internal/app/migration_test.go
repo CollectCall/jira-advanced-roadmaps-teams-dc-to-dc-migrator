@@ -3526,7 +3526,11 @@ func TestExecuteMigrationWithStateAppliesPostMigrationParentLinkCorrections(t *t
 func readCSVRecords(t *testing.T, path string) [][]string {
 	t.Helper()
 
-	file, err := os.Open(path)
+	cleanPath, err := cleanInputFilePath("test CSV", path)
+	if err != nil {
+		t.Fatalf("clean csv path %s: %v", path, err)
+	}
+	file, err := os.OpenInRoot(filepath.Dir(cleanPath), filepath.Base(cleanPath))
 	if err != nil {
 		t.Fatalf("open %s: %v", path, err)
 	}

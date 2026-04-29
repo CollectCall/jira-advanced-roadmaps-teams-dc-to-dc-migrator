@@ -526,6 +526,10 @@ func runConfigInitWizard(cfg Config) error {
 		if err != nil {
 			return err
 		}
+		cfg.SourceBaseURL, err = cleanRequiredJiraBaseURL("source Jira base URL", cfg.SourceBaseURL)
+		if err != nil {
+			return err
+		}
 		cfg.TeamsFile = ""
 		cfg.PersonsFile = ""
 		cfg.ResourcesFile = ""
@@ -575,6 +579,10 @@ func runConfigInitWizard(cfg Config) error {
 		if err != nil {
 			return err
 		}
+		cfg.SourceBaseURL, err = cleanOptionalJiraBaseURL("source Jira base URL", cfg.SourceBaseURL)
+		if err != nil {
+			return err
+		}
 	}
 
 	cfg.TargetBaseURL, err = wizard.value(wizardField{
@@ -585,6 +593,10 @@ func runConfigInitWizard(cfg Config) error {
 		Example:      "https://target.example.com/jira",
 		Default:      cfg.TargetBaseURL,
 	})
+	if err != nil {
+		return err
+	}
+	cfg.TargetBaseURL, err = cleanRequiredJiraBaseURL("target Jira base URL", cfg.TargetBaseURL)
 	if err != nil {
 		return err
 	}
@@ -801,6 +813,21 @@ func promptForVerifiedAuth(wizard *wizardContext, label, baseURL string, usernam
 		*username = ""
 		*password = ""
 	}
+}
+
+func cleanRequiredJiraBaseURL(label, raw string) (string, error) {
+	instanceBaseURL, _, err := normalizeJiraBaseURLs(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid %s: %w", label, err)
+	}
+	return instanceBaseURL, nil
+}
+
+func cleanOptionalJiraBaseURL(label, raw string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", nil
+	}
+	return cleanRequiredJiraBaseURL(label, raw)
 }
 
 func verifyJiraCredentials(baseURL, username, password string) (*CoreJiraUser, error) {
