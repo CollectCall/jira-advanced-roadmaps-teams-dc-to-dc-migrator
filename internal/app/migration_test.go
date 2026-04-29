@@ -195,6 +195,45 @@ func TestSaveProfileStoreRejectsConfigParentTraversal(t *testing.T) {
 	}
 }
 
+func TestSaveProfileStoreWritesLoadableProfile(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "teams-migrator", "config.yaml")
+	store := ProfileStore{
+		CurrentProfile: "default",
+		Profiles: map[string]SavedProfile{
+			"default": {
+				SourceBaseURL: "https://source.example.com/jira",
+				TargetBaseURL: "https://target.example.com/jira",
+				OutputDir:     "out",
+			},
+		},
+	}
+
+	if err := saveProfileStore(configPath, store); err != nil {
+		t.Fatalf("saveProfileStore returned error: %v", err)
+	}
+
+	loaded, err := loadProfileStore(configPath)
+	if err != nil {
+		t.Fatalf("loadProfileStore returned error: %v", err)
+	}
+	if loaded.CurrentProfile != "default" {
+		t.Fatalf("expected current profile default, got %q", loaded.CurrentProfile)
+	}
+	profile, ok := loaded.Profiles["default"]
+	if !ok {
+		t.Fatal("expected default profile to load")
+	}
+	if profile.SourceBaseURL != store.Profiles["default"].SourceBaseURL {
+		t.Fatalf("expected source base URL to round trip, got %q", profile.SourceBaseURL)
+	}
+	if profile.TargetBaseURL != store.Profiles["default"].TargetBaseURL {
+		t.Fatalf("expected target base URL to round trip, got %q", profile.TargetBaseURL)
+	}
+	if profile.OutputDir != "out" {
+		t.Fatalf("expected output dir to round trip, got %q", profile.OutputDir)
+	}
+}
+
 func TestSourceNeedsAuthWhenPasswordMissing(t *testing.T) {
 	if !sourceNeedsAuth(Config{
 		SourceBaseURL:  "https://source.example.com/jira",

@@ -3,6 +3,8 @@ package app
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -95,5 +97,27 @@ func TestNewJiraClientValidatesBaseURL(t *testing.T) {
 				t.Fatalf("newJiraClient(%q) returned error: %v", tt.baseURL, err)
 			}
 		})
+	}
+}
+
+func TestNewValidatedJiraRequestPreservesURLAndBody(t *testing.T) {
+	u, err := url.Parse("https://jira.example.com/jira/rest/api/2/search?jql=project%3DABC&maxResults=50")
+	if err != nil {
+		t.Fatalf("parse test URL: %v", err)
+	}
+
+	req, err := newValidatedJiraRequest(http.MethodPost, *u, strings.NewReader(`{"expand":["names"]}`))
+	if err != nil {
+		t.Fatalf("newValidatedJiraRequest returned error: %v", err)
+	}
+
+	if req.Method != http.MethodPost {
+		t.Fatalf("expected POST method, got %s", req.Method)
+	}
+	if req.URL.String() != u.String() {
+		t.Fatalf("expected URL %q, got %q", u.String(), req.URL.String())
+	}
+	if req.Body == nil {
+		t.Fatal("expected request body to be preserved")
 	}
 }
