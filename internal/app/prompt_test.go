@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bufio"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -121,6 +122,117 @@ func TestApplyInitSavedProfileDefaultsPreservesExplicitProjectScope(t *testing.T
 
 	if cfg.IssueProjectScope != "OPS" {
 		t.Fatalf("expected explicit project scope to be preserved, got %q", cfg.IssueProjectScope)
+	}
+}
+
+func TestVerifyConfiguredScriptRunnerFilterEndpointCanRetryEndpoint(t *testing.T) {
+	var endpointRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rest/api/2/field":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":"customfield_16604","name":"Team","custom":true,"schema":{"custom":"com.atlassian.rm:team","type":"array"}}]`))
+		case "/rest/scriptrunner/latest/custom/findSourceTeamFiltersDB":
+			endpointRequests++
+			if endpointRequests == 1 {
+				http.Error(w, "No such data source: local", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"meta":{"matched":0},"results":[],"parseErrors":[]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{SourceBaseURL: server.URL}
+	wizard := &wizardContext{
+		Title:  "Test",
+		Reader: bufio.NewReader(strings.NewReader("1\n\n")),
+	}
+
+	retryCredentials, err := verifyConfiguredScriptRunnerFilterEndpointWithAuth(wizard, &cfg, "admin", "secret")
+	if err != nil {
+		t.Fatalf("verifyConfiguredScriptRunnerFilterEndpointWithAuth returned error: %v", err)
+	}
+	if retryCredentials {
+		t.Fatal("did not expect credential retry request")
+	}
+	if endpointRequests != 2 {
+		t.Fatalf("expected endpoint to be called twice, got %d", endpointRequests)
+	}
+	if cfg.FilterScriptRunnerEndpoint == "" {
+		t.Fatal("expected verified endpoint to be saved after retry")
+	}
+}
+
+func TestVerifyConfiguredScriptRunnerFilterEndpointCanContinueAfterFailure(t *testing.T) {
+	var endpointRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rest/api/2/field":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":"customfield_16604","name":"Team","custom":true,"schema":{"custom":"com.atlassian.rm:team","type":"array"}}]`))
+		case "/rest/scriptrunner/latest/custom/findSourceTeamFiltersDB":
+			endpointRequests++
+			http.Error(w, "No such data source: local", http.StatusInternalServerError)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{SourceBaseURL: server.URL}
+	wizard := &wizardContext{
+		Title:  "Test",
+		Reader: bufio.NewReader(strings.NewReader("3\n\n")),
+	}
+
+	retryCredentials, err := verifyConfiguredScriptRunnerFilterEndpointWithAuth(wizard, &cfg, "admin", "secret")
+	if err != nil {
+		t.Fatalf("verifyConfiguredScriptRunnerFilterEndpointWithAuth returned error: %v", err)
+	}
+	if retryCredentials {
+		t.Fatal("did not expect credential retry request")
+	}
+	if endpointRequests != 1 {
+		t.Fatalf("expected endpoint to be called once, got %d", endpointRequests)
+	}
+	if cfg.FilterScriptRunnerEndpoint != "" {
+		t.Fatalf("expected endpoint to remain unset after continuing, got %q", cfg.FilterScriptRunnerEndpoint)
+	}
+}
+
+func TestVerifyConfiguredScriptRunnerFilterEndpointCanRetryCredentials(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/rest/api/2/field":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":"customfield_16604","name":"Team","custom":true,"schema":{"custom":"com.atlassian.rm:team","type":"array"}}]`))
+		case "/rest/scriptrunner/latest/custom/findSourceTeamFiltersDB":
+			http.Error(w, "bad credentials", http.StatusUnauthorized)
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{SourceBaseURL: server.URL}
+	wizard := &wizardContext{
+		Title:  "Test",
+		Reader: bufio.NewReader(strings.NewReader("2\n")),
+	}
+
+	retryCredentials, err := verifyConfiguredScriptRunnerFilterEndpointWithAuth(wizard, &cfg, "admin", "wrong")
+	if err != nil {
+		t.Fatalf("verifyConfiguredScriptRunnerFilterEndpointWithAuth returned error: %v", err)
+	}
+	if !retryCredentials {
+		t.Fatal("expected credential retry request")
+	}
+	if cfg.FilterScriptRunnerEndpoint != "" {
+		t.Fatalf("expected endpoint to remain unset after credential retry request, got %q", cfg.FilterScriptRunnerEndpoint)
 	}
 }
 

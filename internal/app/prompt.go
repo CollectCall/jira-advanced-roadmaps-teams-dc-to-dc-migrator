@@ -1304,26 +1304,70 @@ func verifyConfiguredScriptRunnerFilterEndpoint(wizard *wizardContext, cfg *Conf
 		return err
 	}
 
-	endpointURL, fieldLabel, err := verifyTeamFilterScriptRunnerEndpoint(cfg.SourceBaseURL, username, password)
-	if err != nil {
-		cfg.FilterScriptRunnerEndpoint = ""
-		wizard.noteLines([]string{
-			"Could not verify the ScriptRunner filter endpoint yet.",
-			err.Error(),
-			fmt.Sprintf("Expected path: {{jira-url}}%s?enabled=true&lastId=0&limit=500&teamFieldId=<resolved Teams field ID>", teamFilterScriptRunnerEndpointPath),
-			fmt.Sprintf("Current script source in this repo: %s", teamFilterScriptRunnerScriptPath),
-			"A published script URL still needs to be added.",
-		})
-		return nil
+	for {
+		retryCredentials, err := verifyConfiguredScriptRunnerFilterEndpointWithAuth(wizard, cfg, username, password)
+		if err != nil {
+			return err
+		}
+		if !retryCredentials {
+			return nil
+		}
+		username = ""
+		password = ""
+		if err := promptForAuth(wizard, "source verification", &username, &password); err != nil {
+			return err
+		}
 	}
+}
 
-	cfg.FilterScriptRunnerEndpoint = endpointURL
-	wizard.noteLines([]string{
-		"Verified the ScriptRunner custom endpoint for team-ID filter discovery.",
-		fmt.Sprintf("Resolved Teams field: %s", fieldLabel),
-		fmt.Sprintf("Verified endpoint: %s", endpointURL),
-	})
-	return nil
+func verifyConfiguredScriptRunnerFilterEndpointWithAuth(wizard *wizardContext, cfg *Config, username, password string) (bool, error) {
+	for {
+		endpointURL, fieldLabel, err := verifyTeamFilterScriptRunnerEndpoint(cfg.SourceBaseURL, username, password)
+		if err == nil {
+			cfg.FilterScriptRunnerEndpoint = endpointURL
+			wizard.noteLines([]string{
+				"Verified the ScriptRunner custom endpoint for team-ID filter discovery.",
+				fmt.Sprintf("Resolved Teams field: %s", fieldLabel),
+				fmt.Sprintf("Verified endpoint: %s", endpointURL),
+			})
+			return false, nil
+		}
+
+		cfg.FilterScriptRunnerEndpoint = ""
+		choice, choiceErr := wizard.choice(wizardField{
+			Label:        "ScriptRunner endpoint verification failed",
+			Description:  "Could not verify the ScriptRunner filter endpoint yet.",
+			InputHelp:    "Choose retry endpoint verification after fixing ScriptRunner, retry credentials to enter a new username/password, continue to save the profile without a verified endpoint, or cancel to stop this run.",
+			ArtifactInfo: strings.Join(scriptRunnerFilterEndpointFailureLines(err), " "),
+			Default:      "retry endpoint verification",
+		}, []string{"retry endpoint verification", "retry credentials", "continue without verified endpoint", "cancel"})
+		if choiceErr != nil {
+			return false, choiceErr
+		}
+
+		switch choice {
+		case "retry endpoint verification":
+			continue
+		case "retry credentials":
+			return true, nil
+		case "continue without verified endpoint":
+			wizard.noteLines(scriptRunnerFilterEndpointFailureLines(err))
+			return false, nil
+		case "cancel":
+			return false, fmt.Errorf("ScriptRunner endpoint verification cancelled: %w", err)
+		}
+	}
+}
+
+func scriptRunnerFilterEndpointFailureLines(err error) []string {
+	return []string{
+		"Could not verify the ScriptRunner filter endpoint yet.",
+		err.Error(),
+		"The ScriptRunner endpoint requires a database resource named exactly local.",
+		fmt.Sprintf("Expected path: {{jira-url}}%s?enabled=true&lastId=0&limit=500&teamFieldId=<resolved Teams field ID>", teamFilterScriptRunnerEndpointPath),
+		fmt.Sprintf("Current script source in this repo: %s", teamFilterScriptRunnerScriptPath),
+		"A published script URL still needs to be added.",
+	}
 }
 
 func profileSummary(cfg Config) string {
