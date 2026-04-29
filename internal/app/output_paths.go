@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -32,7 +33,7 @@ func pruneOutputFamily(dir, name string, keep int) error {
 		return err
 	}
 
-	entries, err := os.ReadDir(dir)
+	entries, err := readOutputDirEntries(dir)
 	if err != nil {
 		return err
 	}
@@ -92,7 +93,7 @@ func latestOutputFamilyPath(dir, name string) (string, bool) {
 		return "", false
 	}
 
-	entries, err := os.ReadDir(dir)
+	entries, err := readOutputDirEntries(dir)
 	if err != nil {
 		return "", false
 	}
@@ -153,6 +154,19 @@ func cleanInputFilePath(label, path string) (string, error) {
 		return "", fmt.Errorf("%s path %q must not contain parent path traversal", label, path)
 	}
 	return filepath.Clean(path), nil
+}
+
+func readOutputDirEntries(dir string) ([]fs.DirEntry, error) {
+	dir, err := cleanOutputDirPath(dir)
+	if err != nil {
+		return nil, err
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	return fs.ReadDir(root.FS(), ".")
 }
 
 func outputFilePathFromEntry(dir, entryName string) (string, error) {
