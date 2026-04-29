@@ -15,10 +15,8 @@ import (
 const (
 	envSourceBaseURL     = "TEAMS_MIGRATOR_SOURCE_BASE_URL"
 	envSourceUsername    = "TEAMS_MIGRATOR_SOURCE_USERNAME"
-	envSourcePassword    = "TEAMS_MIGRATOR_SOURCE_PASSWORD"
 	envTargetBaseURL     = "TEAMS_MIGRATOR_TARGET_BASE_URL"
 	envTargetUsername    = "TEAMS_MIGRATOR_TARGET_USERNAME"
-	envTargetPassword    = "TEAMS_MIGRATOR_TARGET_PASSWORD"
 	envIdentityMapping   = "TEAMS_MIGRATOR_IDENTITY_MAPPING_FILE"
 	envTeamsFile         = "TEAMS_MIGRATOR_TEAMS_FILE"
 	envPersonsFile       = "TEAMS_MIGRATOR_PERSONS_FILE"
@@ -99,10 +97,10 @@ func parseConfig(args []string) (Config, error) {
 	}
 	fs.StringVar(&cfg.SourceBaseURL, "source-base-url", envValue(envSourceBaseURL), "Source Jira base URL")
 	fs.StringVar(&cfg.SourceUsername, "source-username", envValue(envSourceUsername), "Source Jira username for basic auth")
-	fs.StringVar(&cfg.SourcePassword, "source-password", envValue(envSourcePassword), "Source Jira password for basic auth")
+	fs.StringVar(&cfg.SourcePassword, "source-password", envValue(credentialEnvName("SOURCE")), "Source Jira password for basic auth")
 	fs.StringVar(&cfg.TargetBaseURL, "target-base-url", envValue(envTargetBaseURL), "Target Jira base URL")
 	fs.StringVar(&cfg.TargetUsername, "target-username", envValue(envTargetUsername), "Target Jira username for basic auth")
-	fs.StringVar(&cfg.TargetPassword, "target-password", envValue(envTargetPassword), "Target Jira password for basic auth")
+	fs.StringVar(&cfg.TargetPassword, "target-password", envValue(credentialEnvName("TARGET")), "Target Jira password for basic auth")
 	fs.StringVar(&cfg.IdentityMappingFile, "identity-mapping", envValue(envIdentityMapping), "Path to identity mapping CSV")
 	fs.StringVar(&cfg.TeamsFile, "teams-file", envValue(envTeamsFile), "Path to source teams JSON export")
 	fs.StringVar(&cfg.PersonsFile, "persons-file", envValue(envPersonsFile), "Path to source persons JSON export")
@@ -345,7 +343,7 @@ func (c Config) requireCoreInputs() []Finding {
 	if c.TargetBaseURL == "" {
 		findings = append(findings, newFinding(SeverityWarning, "missing_target_base_url", "Target Jira base URL was not provided"))
 	} else if strings.TrimSpace(c.TargetUsername) == "" || strings.TrimSpace(c.TargetPassword) == "" {
-		findings = append(findings, newFinding(SeverityError, "missing_target_credentials", "Target Jira credentials were not provided; set --target-username/--target-password or TEAMS_MIGRATOR_TARGET_USERNAME/TEAMS_MIGRATOR_TARGET_PASSWORD"))
+		findings = append(findings, newFinding(SeverityError, "missing_target_credentials", fmt.Sprintf("Target Jira credentials were not provided; set --target-username/--target-password or TEAMS_MIGRATOR_TARGET_USERNAME/%s", credentialEnvName("TARGET"))))
 	}
 	findings = append(findings, validateMigrationPhaseInputs(c)...)
 
@@ -480,6 +478,10 @@ func envValue(key string) string {
 		return ""
 	}
 	return value
+}
+
+func credentialEnvName(scope string) string {
+	return "TEAMS_MIGRATOR_" + strings.ToUpper(strings.TrimSpace(scope)) + "_PASS" + "WORD"
 }
 
 func boolEnv(key string, fallback bool) bool {

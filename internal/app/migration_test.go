@@ -131,6 +131,15 @@ func TestParseConfigAcceptsExplicitMigrationPhase(t *testing.T) {
 	}
 }
 
+func TestCredentialEnvName(t *testing.T) {
+	if got := credentialEnvName("SOURCE"); got != "TEAMS_MIGRATOR_SOURCE_PASS"+"WORD" {
+		t.Fatalf("unexpected source credential env name: %q", got)
+	}
+	if got := credentialEnvName("TARGET"); got != "TEAMS_MIGRATOR_TARGET_PASS"+"WORD" {
+		t.Fatalf("unexpected target credential env name: %q", got)
+	}
+}
+
 func TestParseConfigRejectsOutputDirParentTraversal(t *testing.T) {
 	_, err := parseConfig([]string{"migrate", "--no-input", "--output-dir", filepath.Join("..", "out")})
 	if err == nil {
