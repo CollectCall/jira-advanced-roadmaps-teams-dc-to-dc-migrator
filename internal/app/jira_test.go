@@ -29,3 +29,71 @@ func TestJiraClientSendsBasicAuth(t *testing.T) {
 		t.Fatalf("ListTeams returned error: %v", err)
 	}
 }
+
+func TestNewJiraClientValidatesBaseURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		wantErr bool
+	}{
+		{
+			name:    "https instance URL",
+			baseURL: "https://jira.example.com/jira",
+		},
+		{
+			name:    "http instance URL for local test servers",
+			baseURL: "http://127.0.0.1:2990/jira",
+		},
+		{
+			name:    "teams API URL",
+			baseURL: "https://jira.example.com/jira/rest/teams-api/1.0",
+		},
+		{
+			name:    "missing host",
+			baseURL: "https:///jira",
+			wantErr: true,
+		},
+		{
+			name:    "relative URL",
+			baseURL: "/jira",
+			wantErr: true,
+		},
+		{
+			name:    "file URL",
+			baseURL: "file:///etc/passwd",
+			wantErr: true,
+		},
+		{
+			name:    "embedded credentials",
+			baseURL: "https://user:pass@jira.example.com/jira",
+			wantErr: true,
+		},
+		{
+			name:    "query string",
+			baseURL: "https://jira.example.com/jira?target=http://metadata.google.internal",
+			wantErr: true,
+		},
+		{
+			name:    "fragment",
+			baseURL: "https://jira.example.com/jira#admin",
+			wantErr: true,
+		},
+		{
+			name:    "control character",
+			baseURL: "https://jira.example.com/jira\nhttps://metadata.google.internal",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := newJiraClient(tt.baseURL, "user", "pass")
+			if tt.wantErr && err == nil {
+				t.Fatalf("newJiraClient(%q) returned nil error", tt.baseURL)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("newJiraClient(%q) returned error: %v", tt.baseURL, err)
+			}
+		})
+	}
+}

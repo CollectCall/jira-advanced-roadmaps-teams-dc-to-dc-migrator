@@ -65,16 +65,32 @@ func (e *jiraAPIError) Error() string {
 }
 
 func newJiraClient(baseURL, username, password string) (*jiraClient, error) {
-	if strings.TrimSpace(baseURL) == "" {
-		return nil, fmt.Errorf("jira base URL is required")
+	instanceBaseURL, apiBaseURL, err := normalizeJiraBaseURLs(baseURL)
+	if err != nil {
+		return nil, err
 	}
 	return &jiraClient{
-		instanceBaseURL: normalizeInstanceBaseURL(baseURL),
-		baseURL:         normalizeAPIBaseURL(baseURL),
+		instanceBaseURL: instanceBaseURL,
+		baseURL:         apiBaseURL,
 		username:        username,
 		password:        password,
 		httpClient:      &http.Client{Timeout: 30 * time.Second},
 	}, nil
+}
+
+func normalizeJiraBaseURLs(raw string) (string, string, error) {
+	instanceBaseURL, err := validatedJiraBaseURL(normalizeInstanceBaseURL(raw))
+	if err != nil {
+		return "", "", err
+	}
+	if strings.Contains(strings.TrimRight(strings.TrimSpace(raw), "/"), "/rest/teams-api/1.0") {
+		apiBaseURL, err := validatedJiraBaseURL(strings.TrimRight(strings.TrimSpace(raw), "/"))
+		if err != nil {
+			return "", "", err
+		}
+		return instanceBaseURL, apiBaseURL, nil
+	}
+	return instanceBaseURL, instanceBaseURL + "/rest/teams-api/1.0", nil
 }
 
 func normalizeInstanceBaseURL(raw string) string {
@@ -89,6 +105,35 @@ func normalizeAPIBaseURL(raw string) string {
 		return strings.TrimRight(strings.TrimSpace(raw), "/")
 	}
 	return trimmed + "/rest/teams-api/1.0"
+}
+
+func validatedJiraBaseURL(raw string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", fmt.Errorf("jira base URL is required")
+	}
+	if strings.ContainsAny(raw, "\x00\r\n\t") {
+		return "", fmt.Errorf("invalid Jira base URL: contains control characters")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid Jira base URL: %w", err)
+	}
+	if !u.IsAbs() || u.Host == "" || u.Hostname() == "" {
+		return "", fmt.Errorf("invalid Jira base URL: absolute http or https URL with a host is required")
+	}
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return "", fmt.Errorf("invalid Jira base URL: scheme must be http or https")
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("invalid Jira base URL: embedded credentials are not allowed")
+	}
+	if u.RawQuery != "" || u.ForceQuery {
+		return "", fmt.Errorf("invalid Jira base URL: query strings are not allowed")
+	}
+	if u.Fragment != "" {
+		return "", fmt.Errorf("invalid Jira base URL: fragments are not allowed")
+	}
+	return strings.TrimRight(u.String(), "/"), nil
 }
 
 func (c *jiraClient) ListTeams(progress func(current, total int)) ([]TeamDTO, error) {
