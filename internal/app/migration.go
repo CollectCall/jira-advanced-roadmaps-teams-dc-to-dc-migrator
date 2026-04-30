@@ -97,7 +97,9 @@ func executeMigrationWithState(cfg Config, apply bool, state migrationState, fin
 
 	if runsPostMigratePhase(cfg.Command, cfg.Phase) {
 		if needsPostMigrationTargetArtifactsPreparation(cfg, state) {
-			findings = append(findings, preparePostMigrationTargetArtifacts(cfg, &state, nil)...)
+			progress := newProgressTracker(0)
+			findings = append(findings, preparePostMigrationTargetArtifacts(cfg, &state, progress)...)
+			progress.Finish()
 		}
 		execActions, execFindings := applyPostMigrationCorrections(cfg, targetClient, &state)
 		actions = append(actions, execActions...)

@@ -119,7 +119,9 @@ func Run(args []string) int {
 			return ExitFailure
 		}
 		if proceed {
-			followUpFindings := preparePostMigrationTargetArtifacts(cfg, postMigrateFollowUpState, nil)
+			progress := newProgressTracker(0)
+			followUpFindings := preparePostMigrationTargetArtifacts(cfg, postMigrateFollowUpState, progress)
+			progress.Finish()
 			if err := showPreparedPostMigrationFilesPreview(*postMigrateFollowUpState); err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 				return ExitFailure
@@ -501,7 +503,6 @@ func showPreparedPostMigrationFilesFromCurrentOutputs(cfg Config) (migrationStat
 	if hasErrors(findings) {
 		return state, nil
 	}
-	_ = preparePostMigrationTargetArtifacts(postCfg, &state, nil)
 	return state, showPreparedPostMigrationFilesPreview(state)
 }
 
