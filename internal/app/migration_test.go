@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -2296,6 +2297,207 @@ func TestPreparePostMigrationTargetFilterArtifactsWritesSnapshotMatchAndComparis
 	}
 }
 
+func TestPreparePreMigrationFilterTargetMatchArtifactsWritesReusableFilterIDMapping(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/field":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":"customfield_16604","name":"Team","custom":true,"schema":{"custom":"com.atlassian.jpo:jpo-custom-field-team"}}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/scriptrunner/latest/custom/findTargetTeamFiltersDB":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"meta":{"lastId":0,"nextLastId":9001,"scanned":1,"matched":1,"parseErrorCount":0,"limit":500,"dbMode":"local","durationMs":1},"results":[{"id":9001,"name":"Numeric Team Filter","owner":"Jane Doe","jql":"project = ABC AND Team = 42"}],"parseErrors":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/filter/9001":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"9001","name":"Numeric Team Filter","description":"demo","jql":"project = ABC AND Team = 42","owner":{"displayName":"Jane Doe"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		TargetBaseURL:           server.URL,
+		TargetUsername:          "user",
+		TargetPassword:          "pass",
+		OutputDir:               t.TempDir(),
+		OutputTimestamp:         "20260420-132000",
+		FilterTeamIDsInScope:    true,
+		FilterTeamIDsInScopeSet: true,
+	}
+	state := migrationState{
+		FilterTeamClauseRows: []FilterTeamClauseRow{
+			{
+				FilterID:       "10000",
+				FilterName:     "Numeric Team Filter",
+				Owner:          "Jane Doe",
+				MatchType:      "team_id",
+				ClauseValue:    "42",
+				SourceTeamID:   "42",
+				SourceTeamName: "Red Team",
+				Clause:         "Team = 42",
+				JQL:            "project = ABC AND Team = 42",
+			},
+		},
+	}
+
+	findings := preparePreMigrationFilterTargetMatchArtifacts(cfg, &state, nil)
+	if hasErrors(findings) {
+		t.Fatalf("expected no errors, got %#v", findings)
+	}
+	matchPath := artifactPathByKey(state.Artifacts, "pre_migrate_filter_target_match")
+	if filepath.Base(matchPath) != "filter-target-match.pre-migration.20260420-132000.csv" {
+		t.Fatalf("unexpected filter target match path %q", matchPath)
+	}
+	matchRecords := readCSVRecords(t, matchPath)
+	wantMatch := [][]string{
+		{"Source Filter ID", "Source Filter Name", "Source Owner", "Target Filter ID", "Target Filter Name", "Target Owner", "Status", "Reason"},
+		{"10000", "Numeric Team Filter", "Jane Doe", "9001", "Numeric Team Filter", "Jane Doe", "matched", ""},
+	}
+	if !reflect.DeepEqual(matchRecords, wantMatch) {
+		t.Fatalf("unexpected pre-migration filter target match CSV:\nwant: %#v\ngot:  %#v", wantMatch, matchRecords)
+	}
+}
+
+func TestPreparePostMigrationTargetFilterArtifactsReusesPreMigrationFilterIDMapping(t *testing.T) {
+	var scriptRunnerRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/scriptrunner/latest/custom/findTargetTeamFiltersDB":
+			scriptRunnerRequests++
+			t.Fatalf("did not expect target ScriptRunner lookup when prepared filter ID mapping exists")
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/field":
+			t.Fatalf("did not expect target field lookup when prepared filter ID mapping exists")
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/filter/9001":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"9001","name":"Numeric Team Filter","description":"demo","jql":"project = ABC AND Team = 42","owner":{"displayName":"Jane Doe"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "filter-target-match.pre-migration.csv"), strings.Join([]string{
+		"Source Filter ID,Source Filter Name,Source Owner,Target Filter ID,Target Filter Name,Target Owner,Status,Reason",
+		"10000,Numeric Team Filter,Jane Doe,9001,Numeric Team Filter,Jane Doe,matched,",
+	}, "\n"))
+	state, findings := loadPostMigrateTargetArtifactsFromExports(Config{
+		OutputDir:               dir,
+		FilterTeamIDsInScope:    true,
+		FilterTeamIDsInScopeSet: true,
+	}, migrationState{}, nil)
+	if hasErrors(findings) {
+		t.Fatalf("expected no errors loading prepared filter match, got %#v", findings)
+	}
+	if len(state.FilterTargetMatches) != 1 || state.FilterTargetMatches[0].TargetFilterID != "9001" {
+		t.Fatalf("expected pre-migration filter target match loaded, got %#v", state.FilterTargetMatches)
+	}
+	if !needsPostMigrationTargetArtifactsPreparation(Config{FilterTeamIDsInScope: true, FilterTeamIDsInScopeSet: true}, migrationState{
+		FilterTeamClauseRows: []FilterTeamClauseRow{{FilterID: "10000", MatchType: "team_id"}},
+		FilterTargetMatches:  []PostMigrationFilterMatchRow{{SourceFilterID: "10000", TargetFilterID: "9001", Status: "matched"}},
+	}) {
+		t.Fatal("expected post-migration comparison preparation when only filter ID mapping is loaded")
+	}
+
+	cfg := Config{
+		TargetBaseURL:           server.URL,
+		TargetUsername:          "user",
+		TargetPassword:          "pass",
+		OutputDir:               dir,
+		OutputTimestamp:         "20260420-132500",
+		FilterTeamIDsInScope:    true,
+		FilterTeamIDsInScopeSet: true,
+	}
+	state.FilterTeamClauseRows = []FilterTeamClauseRow{{
+		FilterID:     "10000",
+		FilterName:   "Numeric Team Filter",
+		Owner:        "Jane Doe",
+		MatchType:    "team_id",
+		Clause:       "Team = 42",
+		SourceTeamID: "42",
+		JQL:          "project = ABC AND Team = 42",
+	}}
+	state.TeamMappings = []TeamMapping{{SourceTeamID: 42, TargetTeamID: "142", Decision: "created"}}
+
+	findings = preparePostMigrationTargetFilterArtifacts(cfg, &state, nil)
+	if hasErrors(findings) {
+		t.Fatalf("expected no errors preparing post-migration comparison, got %#v", findings)
+	}
+	if scriptRunnerRequests != 0 {
+		t.Fatalf("expected no ScriptRunner requests, got %d", scriptRunnerRequests)
+	}
+	if len(state.FilterComparisons) != 1 {
+		t.Fatalf("expected 1 filter comparison, got %#v", state.FilterComparisons)
+	}
+	comparison := state.FilterComparisons[0]
+	if comparison.TargetFilterID != "9001" || comparison.TargetTeamID != "142" || comparison.Status != "ready" {
+		t.Fatalf("unexpected comparison from prepared filter ID mapping: %#v", comparison)
+	}
+}
+
+func TestLoadPostMigrateInputsLoadsFilterTargetMatchBeforePreparingTargets(t *testing.T) {
+	var scriptRunnerRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/scriptrunner/latest/custom/findTargetTeamFiltersDB":
+			scriptRunnerRequests++
+			t.Fatalf("did not expect target ScriptRunner lookup when pre-migration filter ID mapping exists")
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/field":
+			t.Fatalf("did not expect target field lookup when pre-migration filter ID mapping exists")
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/filter/9001":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"9001","name":"Numeric Team Filter","description":"demo","jql":"project = ABC AND Team = 42","owner":{"displayName":"Jane Doe"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "filters-with-team-clauses.pre-migration.csv"), strings.Join([]string{
+		"Filter ID,Filter Name,Owner,Match Type,Clause Value,Source Team ID,Source Team Name,Matched Clause,JQL",
+		"10000,Numeric Team Filter,Jane Doe,team_id,42,42,Red Team,Team = 42,project = ABC AND Team = 42",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(dir, "filter-target-match.pre-migration.csv"), strings.Join([]string{
+		"Source Filter ID,Source Filter Name,Source Owner,Target Filter ID,Target Filter Name,Target Owner,Status,Reason",
+		"10000,Numeric Team Filter,Jane Doe,9001,Numeric Team Filter,Jane Doe,matched,",
+	}, "\n"))
+
+	cfg := Config{
+		TargetBaseURL:           server.URL,
+		TargetUsername:          "user",
+		TargetPassword:          "pass",
+		OutputDir:               dir,
+		OutputTimestamp:         "20260420-132700",
+		IssueTeamIDsInScope:     false,
+		IssueTeamIDsInScopeSet:  true,
+		ParentLinkInScope:       false,
+		ParentLinkInScopeSet:    true,
+		FilterTeamIDsInScope:    true,
+		FilterTeamIDsInScopeSet: true,
+	}
+	state := migrationState{
+		TeamMappings: []TeamMapping{{SourceTeamID: 42, TargetTeamID: "142", Decision: "merge"}},
+	}
+
+	state, findings := loadPostMigrateInputs(cfg, state, nil, nil)
+	if hasErrors(findings) {
+		t.Fatalf("expected no errors loading post-migrate inputs, got %#v", findings)
+	}
+	if scriptRunnerRequests != 0 {
+		t.Fatalf("expected no ScriptRunner requests, got %d", scriptRunnerRequests)
+	}
+	if len(state.FilterTargetMatches) != 1 || state.FilterTargetMatches[0].TargetFilterID != "9001" {
+		t.Fatalf("expected prepared filter target match loaded, got %#v", state.FilterTargetMatches)
+	}
+	if len(state.FilterComparisons) != 1 {
+		t.Fatalf("expected filter comparison prepared, got %#v", state.FilterComparisons)
+	}
+	if got := state.FilterComparisons[0]; got.TargetFilterID != "9001" || got.TargetTeamID != "142" || got.Status != "ready" {
+		t.Fatalf("unexpected filter comparison: %#v", got)
+	}
+}
+
 func TestLoadTargetFiltersForSourceFilterAcceptsQuotedNumericTeamJQL(t *testing.T) {
 	jql := `project = "Test Project" AND team in ("4", 5)`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -2334,6 +2536,61 @@ func TestLoadTargetFiltersForSourceFilterAcceptsQuotedNumericTeamJQL(t *testing.
 		if finding.Code == "post_migrate_target_filter_parse_errors" {
 			t.Fatalf("unexpected parse warning: %#v", finding)
 		}
+	}
+}
+
+func TestLoadTargetFiltersForSourceFilterRetriesWithoutOwnerForExactJQLMatch(t *testing.T) {
+	jql := "project = ABC AND Team = 42"
+	var requests []url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/scriptrunner/latest/custom/findTargetTeamFiltersDB":
+			requests = append(requests, r.URL.Query())
+			w.Header().Set("Content-Type", "application/json")
+			if r.URL.Query().Get("owner") == "Jane Doe" {
+				_, _ = w.Write([]byte(`{"meta":{"lastId":0,"nextLastId":0,"scanned":14747,"matched":0,"parseErrorCount":0,"limit":500,"dbMode":"sql","durationMs":1},"results":[],"parseErrors":[]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"meta":{"lastId":0,"nextLastId":21402,"scanned":1,"matched":1,"parseErrorCount":0,"limit":500,"dbMode":"sql","durationMs":1},"results":[{"id":21402,"name":"Numeric Team Filter","owner":"jdoe","jql":` + strconv.Quote(jql) + `}],"parseErrors":[]}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := newJiraClient(server.URL, "user", "pass")
+	if err != nil {
+		t.Fatalf("newJiraClient returned error: %v", err)
+	}
+
+	filters, findings, err := loadTargetFiltersForSourceFilter(client, "16604", FilterTeamClauseRow{
+		FilterName: "Numeric Team Filter",
+		Owner:      "Jane Doe",
+		JQL:        jql,
+	}, nil)
+	if err != nil {
+		t.Fatalf("loadTargetFiltersForSourceFilter returned error: %v", err)
+	}
+	if len(filters) != 1 || filters[0].ID != "21402" {
+		t.Fatalf("expected exact-JQL fallback target filter, got %#v", filters)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("expected owner-scoped lookup and ownerless retry, got %d request(s)", len(requests))
+	}
+	if requests[0].Get("owner") != "Jane Doe" {
+		t.Fatalf("expected first request to be owner scoped, got %q", requests[0].Encode())
+	}
+	if requests[1].Get("owner") != "" {
+		t.Fatalf("expected retry without owner, got %q", requests[1].Encode())
+	}
+	foundRetryFinding := false
+	for _, finding := range findings {
+		if finding.Code == "post_migrate_target_filter_owner_retry" {
+			foundRetryFinding = true
+		}
+	}
+	if !foundRetryFinding {
+		t.Fatalf("expected owner retry finding, got %#v", findings)
 	}
 }
 

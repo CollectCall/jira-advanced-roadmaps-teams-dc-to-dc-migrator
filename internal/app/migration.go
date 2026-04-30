@@ -266,7 +266,7 @@ func needsPostMigrationTargetArtifactsPreparation(cfg Config, state migrationSta
 	if cfg.ParentLinkInScope && len(state.ParentLinkRows) > 0 && state.TargetParentLinkSnapshots == nil && state.ParentLinkComparisons == nil {
 		return true
 	}
-	if cfg.FilterTeamIDsInScope && len(state.FilterTeamClauseRows) > 0 && state.TargetFilters == nil && state.TargetFilterSnapshots == nil && state.FilterTargetMatches == nil && state.FilterComparisons == nil {
+	if cfg.FilterTeamIDsInScope && len(state.FilterTeamClauseRows) > 0 && state.FilterComparisons == nil {
 		return true
 	}
 	return false
@@ -513,87 +513,89 @@ func parentLinkFieldRowToJiraField(row ParentLinkFieldRow) *JiraField {
 	return field
 }
 
-func preparePostMigrationTargetFilterArtifacts(cfg Config, state *migrationState, progress *progressTracker) []Finding {
+func preparePreMigrationFilterTargetMatchArtifacts(cfg Config, state *migrationState, progress *progressTracker) []Finding {
 	if !cfg.FilterTeamIDsInScope || len(state.FilterTeamClauseRows) == 0 {
 		return nil
 	}
 
-	state.TargetFilters = nil
-	state.TargetFilterSnapshots = nil
-	state.FilterTargetMatches = nil
-	state.FilterComparisons = nil
-
-	progressStart(progress, "Resolving target Teams field for filter comparison")
+	progressStart(progress, "Resolving target Teams field for filter mapping")
 	targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
 	if err != nil {
 		progressEnd(progress)
-		return []Finding{newFinding(SeverityWarning, "post_migrate_target_filter_client", fmt.Sprintf("Could not create target Jira client for filter lookup: %v", err))}
+		return []Finding{newFinding(SeverityWarning, "pre_migrate_target_filter_client", fmt.Sprintf("Could not create target Jira client for filter lookup: %v", err))}
 	}
 
 	teamFieldID, fieldLabel, err := resolveTeamsCustomFieldNumericID(targetClient)
 	if err != nil {
 		progressEnd(progress)
-		return []Finding{newFinding(SeverityWarning, "post_migrate_target_filter_field", fmt.Sprintf("Could not resolve target Teams field ID for filter lookup: %v", err))}
+		return []Finding{newFinding(SeverityWarning, "pre_migrate_target_filter_field", fmt.Sprintf("Could not resolve target Teams field ID for filter lookup: %v", err))}
 	}
 	progressEnd(progress)
 
-	sourceFilters := uniqueSourceTeamIDFilters(state.FilterTeamClauseRows)
-	if len(sourceFilters) == 0 {
-		return []Finding{newFinding(SeverityInfo, "post_migrate_target_filter_lookup_skipped", "No source filter rows using team IDs were found for target filter lookup")}
+	findings, candidatesBySource, targetFilterIDs := resolveTargetFilterCandidates(targetClient, teamFieldID, fieldLabel, state.FilterTeamClauseRows, progress)
+	if len(candidatesBySource) == 0 {
+		return findings
 	}
 
-	findings := []Finding{
-		newFinding(SeverityInfo, "post_migrate_target_filter_lookup_started", fmt.Sprintf("Resolving target filters for %d source filters using Teams field %s", len(sourceFilters), fieldLabel)),
+	fetchedFilters, fetchFindings := fetchTargetFiltersByID(targetClient, targetFilterIDs, state, progress)
+	findings = append(findings, fetchFindings...)
+
+	matchRows, _ := buildPostMigrationFilterMatchAndComparisonRows(state.FilterTeamClauseRows, candidatesBySource, fetchedFilters, nil)
+	state.FilterTargetMatches = matchRows
+
+	if path, err := writePreMigrationFilterTargetMatchExport(cfg, matchRows); err != nil {
+		findings = append(findings, newFinding(SeverityWarning, "pre_migrate_filter_target_match_failed", err.Error()))
+	} else if path != "" {
+		state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+			Key:   "pre_migrate_filter_target_match",
+			Label: "Pre-migration filter target match",
+			Path:  path,
+			Count: len(matchRows),
+		})
+		findings = append(findings, newFinding(SeverityInfo, "pre_migrate_filter_target_match_generated", fmt.Sprintf("Generated filter target match export: %s", path)))
+	}
+
+	return findings
+}
+
+func preparePostMigrationTargetFilterArtifacts(cfg Config, state *migrationState, progress *progressTracker) []Finding {
+	if !cfg.FilterTeamIDsInScope || len(state.FilterTeamClauseRows) == 0 {
+		return nil
+	}
+
+	preparedMatchRows := state.FilterTargetMatches
+	state.TargetFilters = nil
+	state.TargetFilterSnapshots = nil
+	state.FilterComparisons = nil
+
+	targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
+	if err != nil {
+		return []Finding{newFinding(SeverityWarning, "post_migrate_target_filter_client", fmt.Sprintf("Could not create target Jira client for filter lookup: %v", err))}
 	}
 
 	candidatesBySource := map[string][]JiraFilter{}
 	targetFilterIDs := map[string]struct{}{}
-	var resolveFiltersTask *progressTask
-	if progress != nil {
-		resolveFiltersTask = progress.BeginTask("Resolving target filters by name and owner")
-	}
-	for i, sourceFilter := range sourceFilters {
-		if resolveFiltersTask != nil {
-			resolveFiltersTask.Update(i+1, len(sourceFilters))
-			resolveFiltersTask.Detail(fmt.Sprintf("scanning %s", sourceFilter.FilterName))
-		}
-		candidates, candidateFindings, err := loadTargetFiltersForSourceFilter(targetClient, teamFieldID, sourceFilter, func(scanned, matched int) {
-			if resolveFiltersTask != nil {
-				resolveFiltersTask.Detail(fmt.Sprintf("scanning %s: %d scanned, %d matched", sourceFilter.FilterName, scanned, matched))
-			}
-		})
-		findings = append(findings, candidateFindings...)
+	findings := []Finding{}
+	if len(preparedMatchRows) > 0 {
+		candidatesBySource, targetFilterIDs = targetFilterCandidatesFromMatchRows(preparedMatchRows)
+		state.FilterTargetMatches = preparedMatchRows
+		findings = append(findings, newFinding(SeverityInfo, "post_migrate_filter_target_match_reused_for_comparison", fmt.Sprintf("Using %d prepared filter target match rows for post-migration comparison", len(preparedMatchRows))))
+	} else {
+		progressStart(progress, "Resolving target Teams field for filter comparison")
+		teamFieldID, fieldLabel, err := resolveTeamsCustomFieldNumericID(targetClient)
 		if err != nil {
-			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_filter_lookup_failed", fmt.Sprintf("Could not resolve target filter candidates for %q: %v", sourceFilter.FilterName, err)))
-			continue
+			progressEnd(progress)
+			return []Finding{newFinding(SeverityWarning, "post_migrate_target_filter_field", fmt.Sprintf("Could not resolve target Teams field ID for filter lookup: %v", err))}
 		}
-		candidatesBySource[sourceFilter.FilterID] = candidates
-		for _, filter := range candidates {
-			targetFilterIDs[filter.ID] = struct{}{}
-		}
-	}
-	if resolveFiltersTask != nil {
-		resolveFiltersTask.Done()
+		progressEnd(progress)
+
+		var lookupFindings []Finding
+		lookupFindings, candidatesBySource, targetFilterIDs = resolveTargetFilterCandidates(targetClient, teamFieldID, fieldLabel, state.FilterTeamClauseRows, progress)
+		findings = append(findings, lookupFindings...)
 	}
 
-	fetchedFilters := map[string]JiraFilter{}
-	filterIDs := make([]string, 0, len(targetFilterIDs))
-	for id := range targetFilterIDs {
-		filterIDs = append(filterIDs, id)
-	}
-	sort.Strings(filterIDs)
-	progressStartCount(progress, "Fetching matched target filters")
-	for i, id := range filterIDs {
-		progressUpdateCount(progress, i+1, len(filterIDs))
-		filter, err := targetClient.GetFilter(id)
-		if err != nil {
-			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_filter_fetch_failed", fmt.Sprintf("Could not fetch target filter %s: %v", id, err)))
-			continue
-		}
-		fetchedFilters[id] = *filter
-		state.TargetFilters = append(state.TargetFilters, *filter)
-	}
-	progressEnd(progress)
+	fetchedFilters, fetchFindings := fetchTargetFiltersByID(targetClient, targetFilterIDs, state, progress)
+	findings = append(findings, fetchFindings...)
 
 	snapshotRows := buildTargetFilterSnapshotRows(fetchedFilters)
 	state.TargetFilterSnapshots = snapshotRows
@@ -638,6 +640,91 @@ func preparePostMigrationTargetFilterArtifacts(cfg Config, state *migrationState
 	}
 
 	return findings
+}
+
+func resolveTargetFilterCandidates(client *jiraClient, teamFieldID, fieldLabel string, sourceRows []FilterTeamClauseRow, progress *progressTracker) ([]Finding, map[string][]JiraFilter, map[string]struct{}) {
+	sourceFilters := uniqueSourceTeamIDFilters(sourceRows)
+	if len(sourceFilters) == 0 {
+		return []Finding{newFinding(SeverityInfo, "post_migrate_target_filter_lookup_skipped", "No source filter rows using team IDs were found for target filter lookup")}, nil, nil
+	}
+
+	findings := []Finding{
+		newFinding(SeverityInfo, "post_migrate_target_filter_lookup_started", fmt.Sprintf("Resolving target filters for %d source filters using Teams field %s", len(sourceFilters), fieldLabel)),
+	}
+
+	candidatesBySource := map[string][]JiraFilter{}
+	targetFilterIDs := map[string]struct{}{}
+	var resolveFiltersTask *progressTask
+	if progress != nil {
+		resolveFiltersTask = progress.BeginTask("Resolving target filters by name and owner")
+	}
+	for i, sourceFilter := range sourceFilters {
+		if resolveFiltersTask != nil {
+			resolveFiltersTask.Update(i+1, len(sourceFilters))
+			resolveFiltersTask.Detail(fmt.Sprintf("scanning %s", sourceFilter.FilterName))
+		}
+		candidates, candidateFindings, err := loadTargetFiltersForSourceFilter(client, teamFieldID, sourceFilter, func(scanned, matched int) {
+			if resolveFiltersTask != nil {
+				resolveFiltersTask.Detail(fmt.Sprintf("scanning %s: %d scanned, %d matched", sourceFilter.FilterName, scanned, matched))
+			}
+		})
+		findings = append(findings, candidateFindings...)
+		if err != nil {
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_filter_lookup_failed", fmt.Sprintf("Could not resolve target filter candidates for %q: %v", sourceFilter.FilterName, err)))
+			continue
+		}
+		candidatesBySource[sourceFilter.FilterID] = candidates
+		for _, filter := range candidates {
+			targetFilterIDs[filter.ID] = struct{}{}
+		}
+	}
+	if resolveFiltersTask != nil {
+		resolveFiltersTask.Done()
+	}
+	return findings, candidatesBySource, targetFilterIDs
+}
+
+func targetFilterCandidatesFromMatchRows(rows []PostMigrationFilterMatchRow) (map[string][]JiraFilter, map[string]struct{}) {
+	candidatesBySource := map[string][]JiraFilter{}
+	targetFilterIDs := map[string]struct{}{}
+	for _, row := range rows {
+		targetID := strings.TrimSpace(row.TargetFilterID)
+		if targetID == "" || (row.Status != "matched" && row.Status != "ambiguous") {
+			continue
+		}
+		filter := JiraFilter{ID: targetID, Name: row.TargetFilterName}
+		if strings.TrimSpace(row.TargetOwner) != "" {
+			filter.Owner = &JiraFilterUser{DisplayName: row.TargetOwner, Name: row.TargetOwner, Key: row.TargetOwner}
+		}
+		candidatesBySource[row.SourceFilterID] = append(candidatesBySource[row.SourceFilterID], filter)
+		targetFilterIDs[targetID] = struct{}{}
+	}
+	return candidatesBySource, targetFilterIDs
+}
+
+func fetchTargetFiltersByID(client *jiraClient, targetFilterIDs map[string]struct{}, state *migrationState, progress *progressTracker) (map[string]JiraFilter, []Finding) {
+	findings := []Finding{}
+	fetchedFilters := map[string]JiraFilter{}
+	filterIDs := make([]string, 0, len(targetFilterIDs))
+	for id := range targetFilterIDs {
+		filterIDs = append(filterIDs, id)
+	}
+	sort.Strings(filterIDs)
+	progressStartCount(progress, "Fetching matched target filters")
+	for i, id := range filterIDs {
+		progressUpdateCount(progress, i+1, len(filterIDs))
+		filter, err := client.GetFilter(id)
+		if err != nil {
+			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_filter_fetch_failed", fmt.Sprintf("Could not fetch target filter %s: %v", id, err)))
+			continue
+		}
+		fetchedFilters[id] = *filter
+		if state != nil {
+			state.TargetFilters = append(state.TargetFilters, *filter)
+		}
+	}
+	progressEnd(progress)
+	return fetchedFilters, findings
 }
 
 func uniqueSourceTeamIDFilters(rows []FilterTeamClauseRow) []FilterTeamClauseRow {
@@ -732,6 +819,24 @@ func missingIssueKeys(keys []string, issues map[string]JiraIssue) []string {
 }
 
 func loadTargetFiltersForSourceFilter(client *jiraClient, teamFieldID string, sourceFilter FilterTeamClauseRow, progress func(scanned, matched int)) ([]JiraFilter, []Finding, error) {
+	filters, findings, err := loadTargetFiltersForSourceFilterQuery(client, teamFieldID, sourceFilter, strings.TrimSpace(sourceFilter.Owner), progress)
+	if err != nil || len(filters) > 0 || strings.TrimSpace(sourceFilter.Owner) == "" {
+		return filters, findings, err
+	}
+
+	findings = append(findings, newFinding(SeverityInfo, "post_migrate_target_filter_owner_retry", fmt.Sprintf("Owner-scoped target filter lookup found no candidates for %q; retrying by exact name and JQL without owner", sourceFilter.FilterName)))
+	fallbackFilters, fallbackFindings, fallbackErr := loadTargetFiltersForSourceFilterQuery(client, teamFieldID, sourceFilter, "", progress)
+	findings = append(findings, fallbackFindings...)
+	if fallbackErr != nil {
+		return filters, findings, fallbackErr
+	}
+	if len(fallbackFilters) == 0 {
+		return filters, findings, nil
+	}
+	return fallbackFilters, findings, nil
+}
+
+func loadTargetFiltersForSourceFilterQuery(client *jiraClient, teamFieldID string, sourceFilter FilterTeamClauseRow, owner string, progress func(scanned, matched int)) ([]JiraFilter, []Finding, error) {
 	var (
 		lastID           int64
 		totalScanned     int
@@ -747,8 +852,8 @@ func loadTargetFiltersForSourceFilter(client *jiraClient, teamFieldID string, so
 		query.Set("limit", strconv.Itoa(teamFilterScriptRunnerPageSize))
 		query.Set("teamFieldId", teamFieldID)
 		query.Set("filterName", sourceFilter.FilterName)
-		if strings.TrimSpace(sourceFilter.Owner) != "" {
-			query.Set("owner", sourceFilter.Owner)
+		if strings.TrimSpace(owner) != "" {
+			query.Set("owner", owner)
 		}
 
 		body, err := client.doCoreJSON(http.MethodGet, targetTeamFilterScriptRunnerEndpointPath, query, nil)
@@ -766,16 +871,16 @@ func loadTargetFiltersForSourceFilter(client *jiraClient, teamFieldID string, so
 		}
 
 		for _, result := range response.Results {
-			owner := strings.TrimSpace(result.Owner)
+			resultOwner := strings.TrimSpace(result.Owner)
 			filter := JiraFilter{
 				ID:   strconv.FormatInt(result.ID, 10),
 				Name: result.Name,
 				JQL:  result.JQL,
 			}
-			if owner != "" {
-				filter.Owner = &JiraFilterUser{DisplayName: owner, Name: owner, Key: owner}
+			if resultOwner != "" {
+				filter.Owner = &JiraFilterUser{DisplayName: resultOwner, Name: resultOwner, Key: resultOwner}
 			}
-			if targetFilterMatchesSource(filter, sourceFilter) {
+			if targetFilterMatchesSourceWithOwnerScope(filter, sourceFilter, strings.TrimSpace(owner) != "") {
 				filters = append(filters, filter)
 			}
 		}
@@ -839,6 +944,10 @@ func summarizeTeamFilterParseErrors(parseErrors []teamFilterParseError, maxSampl
 }
 
 func targetFilterMatchesSource(filter JiraFilter, sourceFilter FilterTeamClauseRow) bool {
+	return targetFilterMatchesSourceWithOwnerScope(filter, sourceFilter, true)
+}
+
+func targetFilterMatchesSourceWithOwnerScope(filter JiraFilter, sourceFilter FilterTeamClauseRow, requireOwner bool) bool {
 	if normalizeTitle(filter.Name) != normalizeTitle(sourceFilter.FilterName) {
 		return false
 	}
@@ -846,7 +955,17 @@ func targetFilterMatchesSource(filter JiraFilter, sourceFilter FilterTeamClauseR
 	if sourceOwner == "" {
 		return true
 	}
-	return normalizeTitle(filterOwnerLabel(filter.Owner)) == sourceOwner
+	if !requireOwner {
+		return normalizeFilterJQL(filter.JQL) != "" && normalizeFilterJQL(filter.JQL) == normalizeFilterJQL(sourceFilter.JQL)
+	}
+	if normalizeTitle(filterOwnerLabel(filter.Owner)) == sourceOwner {
+		return true
+	}
+	return normalizeFilterJQL(filter.JQL) != "" && normalizeFilterJQL(filter.JQL) == normalizeFilterJQL(sourceFilter.JQL)
+}
+
+func normalizeFilterJQL(jql string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(jql))), " ")
 }
 
 func deduplicateFiltersByID(filters []JiraFilter) []JiraFilter {
@@ -1641,6 +1760,11 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 				findings = append(findings, newFinding(SeverityInfo, artifact.Key+"_generated", fmt.Sprintf("Generated %s: %s", strings.ToLower(artifact.Label), artifact.Path)))
 			}
 			progress.End()
+
+			progress.StartCount("Resolving target filters for source filter mapping")
+			filterMatchFindings := preparePreMigrationFilterTargetMatchArtifacts(cfg, &state, progress)
+			findings = append(findings, filterMatchFindings...)
+			progress.End()
 		}
 
 		progress.Start("Writing generated identity mapping")
@@ -1714,6 +1838,13 @@ func latestPostMigrateTeamMappingPath(outputDir string) (string, bool) {
 		return path, true
 	}
 	return latestOutputFamilyPath(outputDir, "team-mapping.pre-migration.csv")
+}
+
+func latestFilterTargetMatchPath(outputDir string) (string, bool) {
+	if path, ok := latestOutputFamilyPath(outputDir, "filter-target-match.post-migration.csv"); ok {
+		return path, true
+	}
+	return latestOutputFamilyPath(outputDir, "filter-target-match.pre-migration.csv")
 }
 
 func loadMigrateStateFromPreparedArtifacts(cfg Config, progress *progressTracker) (migrationState, []Finding) {
@@ -1889,18 +2020,9 @@ func loadPostMigrateTargetArtifactsFromExports(cfg Config, state migrationState,
 			}
 			progressEnd(progress)
 		}
-		if path, ok := latestOutputFamilyPath(cfg.OutputDir, "filter-target-match.post-migration.csv"); ok {
-			progressStart(progress, "Loading filter target match")
-			rows, err := loadPostMigrationFilterMatchRowsFromExport(path)
-			if err != nil {
-				findings = append(findings, newFinding(SeverityWarning, "post_migrate_filter_target_match_reuse_failed", fmt.Sprintf("Could not reuse filter target match %s: %v", path, err)))
-			} else {
-				state.FilterTargetMatches = rows
-				state.Artifacts = replaceArtifact(state.Artifacts, Artifact{Key: "post_migrate_filter_target_match", Label: "Post-migration filter target match", Path: path, Count: len(rows)})
-				findings = append(findings, newFinding(SeverityInfo, "post_migrate_filter_target_match_reused", fmt.Sprintf("Reused filter target match: %s", path)))
-			}
-			progressEnd(progress)
-		}
+		var matchFindings []Finding
+		state, matchFindings = loadFilterTargetMatchFromExports(cfg, state, progress)
+		findings = append(findings, matchFindings...)
 		if path, ok := latestOutputFamilyPath(cfg.OutputDir, "filter-jql-comparison.post-migration.csv"); ok {
 			progressStart(progress, "Loading filter JQL comparison")
 			rows, err := loadPostMigrationFilterComparisonRowsFromExport(path)
@@ -1916,6 +2038,25 @@ func loadPostMigrateTargetArtifactsFromExports(cfg Config, state migrationState,
 	}
 
 	return state, findings
+}
+
+func loadFilterTargetMatchFromExports(cfg Config, state migrationState, progress *progressTracker) (migrationState, []Finding) {
+	path, ok := latestFilterTargetMatchPath(cfg.OutputDir)
+	if !ok {
+		return state, nil
+	}
+
+	progressStart(progress, "Loading filter target match")
+	defer progressEnd(progress)
+
+	rows, err := loadPostMigrationFilterMatchRowsFromExport(path)
+	if err != nil {
+		return state, []Finding{newFinding(SeverityWarning, "post_migrate_filter_target_match_reuse_failed", fmt.Sprintf("Could not reuse filter target match %s: %v", path, err))}
+	}
+
+	state.FilterTargetMatches = rows
+	state.Artifacts = replaceArtifact(state.Artifacts, Artifact{Key: "post_migrate_filter_target_match", Label: "Post-migration filter target match", Path: path, Count: len(rows)})
+	return state, []Finding{newFinding(SeverityInfo, "post_migrate_filter_target_match_reused", fmt.Sprintf("Reused filter target match: %s", path))}
 }
 
 func jiraFiltersFromTargetFilterSnapshots(rows []TargetFilterSnapshotRow) []JiraFilter {
@@ -2107,6 +2248,10 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 
 		if len(state.FilterTeamClauseRows) == 0 {
 			findings = append(findings, newFinding(SeverityError, "post_migrate_filter_input_missing", "Post-migrate phase needs the pre-migrate source filter export. Run pre-migrate first so the source list of filters with team IDs is resolved and exported."))
+		} else if len(state.FilterTargetMatches) == 0 && !cfg.SkipPostMigrateArtifactReuse {
+			var matchFindings []Finding
+			state, matchFindings = loadFilterTargetMatchFromExports(cfg, state, progress)
+			findings = append(findings, matchFindings...)
 		}
 	}
 
@@ -4283,6 +4428,14 @@ func writeTargetFilterSnapshotExport(cfg Config, rows []TargetFilterSnapshotRow)
 }
 
 func writePostMigrationFilterTargetMatchExport(cfg Config, rows []PostMigrationFilterMatchRow) (string, error) {
+	return writeFilterTargetMatchExport(cfg, "filter-target-match.post-migration.csv", rows)
+}
+
+func writePreMigrationFilterTargetMatchExport(cfg Config, rows []PostMigrationFilterMatchRow) (string, error) {
+	return writeFilterTargetMatchExport(cfg, "filter-target-match.pre-migration.csv", rows)
+}
+
+func writeFilterTargetMatchExport(cfg Config, name string, rows []PostMigrationFilterMatchRow) (string, error) {
 	if len(rows) == 0 {
 		return "", nil
 	}
@@ -4301,7 +4454,7 @@ func writePostMigrationFilterTargetMatchExport(cfg Config, rows []PostMigrationF
 	}
 	return writeCSVExport(
 		cfg,
-		"filter-target-match.post-migration.csv",
+		name,
 		[]string{"Source Filter ID", "Source Filter Name", "Source Owner", "Target Filter ID", "Target Filter Name", "Target Owner", "Status", "Reason"},
 		records,
 	)
