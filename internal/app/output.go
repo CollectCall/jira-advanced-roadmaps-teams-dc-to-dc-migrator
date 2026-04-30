@@ -309,7 +309,7 @@ func printInteractivePostMigrateApplySummary(w io.Writer, report Report, reportP
 
 	if lines := summarizePostMigrateActions(report.Actions); len(lines) > 0 {
 		fmt.Fprintln(w)
-		fmt.Fprintln(w, theme.style("Applied", theme.titleColor))
+		fmt.Fprintln(w, theme.style("Results", theme.titleColor))
 		for _, line := range lines {
 			fmt.Fprintf(w, "- %s\n", line)
 		}

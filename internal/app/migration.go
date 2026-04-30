@@ -548,10 +548,20 @@ func preparePostMigrationTargetFilterArtifacts(cfg Config, state *migrationState
 
 	candidatesBySource := map[string][]JiraFilter{}
 	targetFilterIDs := map[string]struct{}{}
-	progressStartCount(progress, "Resolving target filters by name and owner")
+	var resolveFiltersTask *progressTask
+	if progress != nil {
+		resolveFiltersTask = progress.BeginTask("Resolving target filters by name and owner")
+	}
 	for i, sourceFilter := range sourceFilters {
-		progressUpdateCount(progress, i+1, len(sourceFilters))
-		candidates, candidateFindings, err := loadTargetFiltersForSourceFilter(targetClient, teamFieldID, sourceFilter)
+		if resolveFiltersTask != nil {
+			resolveFiltersTask.Update(i+1, len(sourceFilters))
+			resolveFiltersTask.Detail(fmt.Sprintf("scanning %s", sourceFilter.FilterName))
+		}
+		candidates, candidateFindings, err := loadTargetFiltersForSourceFilter(targetClient, teamFieldID, sourceFilter, func(scanned, matched int) {
+			if resolveFiltersTask != nil {
+				resolveFiltersTask.Detail(fmt.Sprintf("scanning %s: %d scanned, %d matched", sourceFilter.FilterName, scanned, matched))
+			}
+		})
 		findings = append(findings, candidateFindings...)
 		if err != nil {
 			findings = append(findings, newFinding(SeverityWarning, "post_migrate_target_filter_lookup_failed", fmt.Sprintf("Could not resolve target filter candidates for %q: %v", sourceFilter.FilterName, err)))
@@ -562,7 +572,9 @@ func preparePostMigrationTargetFilterArtifacts(cfg Config, state *migrationState
 			targetFilterIDs[filter.ID] = struct{}{}
 		}
 	}
-	progressEnd(progress)
+	if resolveFiltersTask != nil {
+		resolveFiltersTask.Done()
+	}
 
 	fetchedFilters := map[string]JiraFilter{}
 	filterIDs := make([]string, 0, len(targetFilterIDs))
@@ -719,7 +731,7 @@ func missingIssueKeys(keys []string, issues map[string]JiraIssue) []string {
 	return missing
 }
 
-func loadTargetFiltersForSourceFilter(client *jiraClient, teamFieldID string, sourceFilter FilterTeamClauseRow) ([]JiraFilter, []Finding, error) {
+func loadTargetFiltersForSourceFilter(client *jiraClient, teamFieldID string, sourceFilter FilterTeamClauseRow, progress func(scanned, matched int)) ([]JiraFilter, []Finding, error) {
 	var (
 		lastID           int64
 		totalScanned     int
@@ -771,6 +783,9 @@ func loadTargetFiltersForSourceFilter(client *jiraClient, teamFieldID string, so
 		totalScanned += response.Meta.Scanned
 		totalParseErrors += response.Meta.ParseErrorCount
 		parseErrors = append(parseErrors, response.ParseErrors...)
+		if progress != nil {
+			progress(totalScanned, len(filters))
+		}
 		if response.Meta.Scanned == 0 || response.Meta.NextLastID <= lastID || response.Meta.Scanned < teamFilterScriptRunnerPageSize {
 			break
 		}
@@ -1068,7 +1083,7 @@ func buildPostMigrationParentLinkComparisonRow(client *jiraClient, sourceRow Par
 	row.CurrentParentIssueID = currentParentID
 	row.CurrentParentIssueKey = currentParentKey
 
-	if row.CurrentParentIssueID == targetParent.ID || (row.CurrentParentIssueID == "" && row.CurrentParentIssueKey != "" && row.CurrentParentIssueKey == targetParent.Key) {
+	if parentReferenceMatches(row.CurrentParentIssueID, row.CurrentParentIssueKey, targetParent.ID, targetParent.Key) {
 		row.Status = "already_rewritten"
 		row.Reason = "the target issue already points to the mapped target parent issue"
 		return row, nil
@@ -1086,6 +1101,9 @@ func resolveIssueReference(client *jiraClient, raw any, cache map[string]JiraIss
 		return "", "", nil
 	}
 	if issueKey != "" && issueID != "" {
+		if issueID == issueKey || looksLikeIssueKey(issueID) {
+			return "", issueKey, nil
+		}
 		return issueID, issueKey, nil
 	}
 
@@ -1099,6 +1117,39 @@ func resolveIssueReference(client *jiraClient, raw any, cache map[string]JiraIss
 	}
 	cache[lookupKey] = *issue
 	return nonEmptyString(issueID, issue.ID), nonEmptyString(issueKey, issue.Key), nil
+}
+
+func parentReferenceMatches(currentID, currentKey, targetID, targetKey string) bool {
+	currentID = strings.TrimSpace(currentID)
+	currentKey = strings.TrimSpace(currentKey)
+	targetID = strings.TrimSpace(targetID)
+	targetKey = strings.TrimSpace(targetKey)
+	if currentID != "" && targetID != "" && currentID == targetID {
+		return true
+	}
+	return currentKey != "" && targetKey != "" && currentKey == targetKey
+}
+
+func looksLikeIssueKey(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.Contains(value, " ") || !strings.Contains(value, "-") {
+		return false
+	}
+	parts := strings.Split(value, "-")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return false
+	}
+	for _, r := range parts[0] {
+		if !(r >= 'A' && r <= 'Z') && !(r >= '0' && r <= '9') && r != '_' {
+			return false
+		}
+	}
+	for _, r := range parts[1] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func buildPostMigrationFilterMatchAndComparisonRows(sourceRows []FilterTeamClauseRow, candidatesBySource map[string][]JiraFilter, fetchedFilters map[string]JiraFilter, teamMappings []TeamMapping) ([]PostMigrationFilterMatchRow, []PostMigrationFilterComparisonRow) {
@@ -1603,9 +1654,11 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 		postState, postFindings := loadPostMigrateInputs(cfg, state, sourceClient, progress)
 		state = postState
 		findings = append(findings, postFindings...)
-		postState, postFindings = loadPostMigrateTargetArtifactsFromExports(cfg, state, progress)
-		state = postState
-		findings = append(findings, postFindings...)
+		if !cfg.SkipPostMigrateArtifactReuse {
+			postState, postFindings = loadPostMigrateTargetArtifactsFromExports(cfg, state, progress)
+			state = postState
+			findings = append(findings, postFindings...)
+		}
 	}
 
 	return state, findings
@@ -1758,8 +1811,10 @@ func loadPostMigrateStateFromPreparedArtifacts(cfg Config, progress *progressTra
 	var inputFindings []Finding
 	state, inputFindings = loadPostMigrateInputs(cfg, state, nil, progress)
 	findings = append(findings, inputFindings...)
-	state, inputFindings = loadPostMigrateTargetArtifactsFromExports(cfg, state, progress)
-	findings = append(findings, inputFindings...)
+	if !cfg.SkipPostMigrateArtifactReuse {
+		state, inputFindings = loadPostMigrateTargetArtifactsFromExports(cfg, state, progress)
+		findings = append(findings, inputFindings...)
+	}
 	return state, findings
 }
 
@@ -2440,10 +2495,15 @@ func planResourceActions(state migrationState) ([]Action, []Finding) {
 func applyMigration(client *jiraClient, state *migrationState) ([]Action, []Finding) {
 	var actions []Action
 	var findings []Finding
+	progress := newProgressTracker(0)
+	defer progress.Finish()
 
 	teamIDs := map[int64]int64{}
+	teamTask := progress.BeginTask("Applying team migrations")
 	for i := range state.TeamMappings {
 		mapping := &state.TeamMappings[i]
+		teamTask.Update(i+1, len(state.TeamMappings))
+		teamTask.Detail(mapping.SourceTitle)
 		switch mapping.Decision {
 		case "merge":
 			targetID, _ := strconv.ParseInt(mapping.TargetTeamID, 10, 64)
@@ -2467,9 +2527,14 @@ func applyMigration(client *jiraClient, state *migrationState) ([]Action, []Find
 			})
 		}
 	}
+	teamTask.Detail(fmt.Sprintf("%d processed, %d created", len(state.TeamMappings), countActionsByKindStatus(actions, "team", "created")))
+	teamTask.Done()
 
+	resourceTask := progress.BeginTask("Applying team memberships")
 	for i := range state.ResourcePlans {
 		resource := &state.ResourcePlans[i]
+		resourceTask.Update(i+1, len(state.ResourcePlans))
+		resourceTask.Detail(fmt.Sprintf("resource %d", resource.SourceResourceID))
 		if resource.Status == "skipped" {
 			continue
 		}
@@ -2491,8 +2556,20 @@ func applyMigration(client *jiraClient, state *migrationState) ([]Action, []Find
 			Details:  fmt.Sprintf("team=%d user=%s", targetTeamID, resource.TargetUserID),
 		})
 	}
+	resourceTask.Detail(fmt.Sprintf("%d processed, %d created", len(state.ResourcePlans), countActionsByKindStatus(actions, "resource", "created")))
+	resourceTask.Done()
 
 	return actions, findings
+}
+
+func countActionsByKindStatus(actions []Action, kind, status string) int {
+	count := 0
+	for _, action := range actions {
+		if action.Kind == kind && action.Status == status {
+			count++
+		}
+	}
+	return count
 }
 
 func applyPostMigrationCorrections(cfg Config, client *jiraClient, state *migrationState) ([]Action, []Finding) {
@@ -2507,6 +2584,7 @@ func applyPostMigrationCorrections(cfg Config, client *jiraClient, state *migrat
 		actions = append(actions, issueActions...)
 		findings = append(findings, issueFindings...)
 		state.IssueUpdateResults = issueResults
+		actions = append(actions, issueSkippedCorrectionActions(issueResults)...)
 		if path, err := writePostMigrationIssueUpdateResultsExport(cfg, issueResults); err != nil {
 			findings = append(findings, newFinding(SeverityWarning, "post_migrate_issue_results_export_failed", err.Error()))
 		} else if path != "" {
@@ -2528,6 +2606,7 @@ func applyPostMigrationCorrections(cfg Config, client *jiraClient, state *migrat
 		actions = append(actions, parentLinkActions...)
 		findings = append(findings, parentLinkFindings...)
 		state.ParentLinkUpdateResults = parentLinkResults
+		actions = append(actions, parentLinkSkippedCorrectionActions(parentLinkResults)...)
 		if path, err := writePostMigrationParentLinkUpdateResultsExport(cfg, parentLinkResults); err != nil {
 			findings = append(findings, newFinding(SeverityWarning, "post_migrate_parent_link_results_export_failed", err.Error()))
 		} else if path != "" {
@@ -2549,6 +2628,7 @@ func applyPostMigrationCorrections(cfg Config, client *jiraClient, state *migrat
 		actions = append(actions, filterActions...)
 		findings = append(findings, filterFindings...)
 		state.FilterUpdateResults = filterResults
+		actions = append(actions, filterSkippedCorrectionActions(filterResults)...)
 		if path, err := writePostMigrationFilterUpdateResultsExport(cfg, filterResults); err != nil {
 			findings = append(findings, newFinding(SeverityWarning, "post_migrate_filter_results_export_failed", err.Error()))
 		} else if path != "" {
@@ -2581,6 +2661,68 @@ func countPostMigrationApplyTasks(cfg Config) int {
 	return total
 }
 
+func issueSkippedCorrectionActions(rows []PostMigrationIssueResultRow) []Action {
+	actions := make([]Action, 0)
+	for _, row := range rows {
+		if row.Status == "" || row.Status == "updated" {
+			continue
+		}
+		actions = append(actions, Action{
+			Kind:     "post_migrate_issue_update",
+			SourceID: row.IssueKey,
+			Status:   "skipped",
+			Details:  postMigrationSkippedCorrectionDetails(row.Status, row.Message),
+		})
+	}
+	return actions
+}
+
+func parentLinkSkippedCorrectionActions(rows []PostMigrationParentLinkResultRow) []Action {
+	actions := make([]Action, 0)
+	for _, row := range rows {
+		if row.Status == "" || row.Status == "updated" {
+			continue
+		}
+		actions = append(actions, Action{
+			Kind:     "post_migrate_parent_link_update",
+			SourceID: row.IssueKey,
+			TargetID: row.TargetParentIssueID,
+			Status:   "skipped",
+			Details:  postMigrationSkippedCorrectionDetails(row.Status, row.Message),
+		})
+	}
+	return actions
+}
+
+func filterSkippedCorrectionActions(rows []PostMigrationFilterResultRow) []Action {
+	actions := make([]Action, 0)
+	for _, row := range rows {
+		if row.Status == "" || row.Status == "updated" {
+			continue
+		}
+		actions = append(actions, Action{
+			Kind:     "post_migrate_filter_update",
+			SourceID: row.SourceFilterID,
+			TargetID: row.TargetFilterID,
+			Status:   "skipped",
+			Details:  postMigrationSkippedCorrectionDetails(row.Status, row.Message),
+		})
+	}
+	return actions
+}
+
+func postMigrationSkippedCorrectionDetails(status, message string) string {
+	status = strings.TrimSpace(status)
+	message = strings.TrimSpace(message)
+	if status == "" {
+		return message
+	}
+	if message == "" {
+		return status
+	}
+	return fmt.Sprintf("%s: %s", status, message)
+}
+
 func applyPostMigrationIssueCorrections(cfg Config, client *jiraClient, state *migrationState, progress *progressTask) ([]Action, []Finding, []PostMigrationIssueResultRow) {
 	if len(state.IssueComparisons) == 0 {
 		progress.Done()
@@ -2595,6 +2737,7 @@ func applyPostMigrationIssueCorrections(cfg Config, client *jiraClient, state *m
 
 	for i, comparison := range state.IssueComparisons {
 		progress.Update(i+1, len(state.IssueComparisons))
+		progress.Detail(fmt.Sprintf("preparing %s", comparison.IssueKey))
 		result := PostMigrationIssueResultRow{
 			IssueKey:           comparison.IssueKey,
 			SourceTeamsFieldID: comparison.SourceTeamsFieldID,
@@ -2660,6 +2803,7 @@ func applyPostMigrationIssueCorrections(cfg Config, client *jiraClient, state *m
 		}
 
 		if cfg.SkipPostMigrateDriftChecks {
+			progress.Detail(fmt.Sprintf("updating %s from prepared comparison", comparison.IssueKey))
 			if err := client.UpdateIssueFields(comparison.IssueKey, map[string]any{comparison.TargetTeamsFieldID: issueTeamFieldValueFromIDs(targetIDs)}); err != nil {
 				result.Status = "update_failed"
 				result.Message = fmt.Sprintf("Could not update target issue from prepared comparison: %v", err)
@@ -2680,6 +2824,7 @@ func applyPostMigrationIssueCorrections(cfg Config, client *jiraClient, state *m
 			continue
 		}
 
+		progress.Detail(fmt.Sprintf("checking %s", comparison.IssueKey))
 		targetIssue, err := client.GetIssue(comparison.IssueKey, []string{comparison.TargetTeamsFieldID})
 		if err != nil {
 			result.Status = "fetch_failed"
@@ -2731,6 +2876,7 @@ func applyPostMigrationIssueCorrections(cfg Config, client *jiraClient, state *m
 			updateValue = issueTeamFieldUpdateValue(raw, rewrittenRaw)
 		}
 
+		progress.Detail(fmt.Sprintf("updating %s", comparison.IssueKey))
 		if err := client.UpdateIssueFields(comparison.IssueKey, map[string]any{comparison.TargetTeamsFieldID: updateValue}); err != nil {
 			result.Status = "update_failed"
 			result.Message = fmt.Sprintf("Could not update target issue: %v", err)
@@ -2751,8 +2897,20 @@ func applyPostMigrationIssueCorrections(cfg Config, client *jiraClient, state *m
 		})
 	}
 
+	updated := countIssueResultStatus(results, "updated")
+	progress.Detail(fmt.Sprintf("%d processed, %d updated, %d skipped", len(results), updated, len(results)-updated))
 	progress.Done()
 	return actions, findings, results
+}
+
+func countIssueResultStatus(rows []PostMigrationIssueResultRow, status string) int {
+	count := 0
+	for _, row := range rows {
+		if row.Status == status {
+			count++
+		}
+	}
+	return count
 }
 
 func applyPostMigrationParentLinkCorrections(cfg Config, client *jiraClient, state *migrationState, progress *progressTask) ([]Action, []Finding, []PostMigrationParentLinkResultRow) {
@@ -2769,6 +2927,7 @@ func applyPostMigrationParentLinkCorrections(cfg Config, client *jiraClient, sta
 
 	for i, comparison := range state.ParentLinkComparisons {
 		progress.Update(i+1, len(state.ParentLinkComparisons))
+		progress.Detail(fmt.Sprintf("preparing %s", comparison.IssueKey))
 		result := PostMigrationParentLinkResultRow{
 			IssueKey:                comparison.IssueKey,
 			SourceParentLinkFieldID: comparison.SourceParentLinkFieldID,
@@ -2807,6 +2966,7 @@ func applyPostMigrationParentLinkCorrections(cfg Config, client *jiraClient, sta
 		}
 
 		if cfg.SkipPostMigrateDriftChecks {
+			progress.Detail(fmt.Sprintf("updating %s from prepared comparison", comparison.IssueKey))
 			if err := client.UpdateIssueFields(comparison.IssueKey, map[string]any{
 				comparison.TargetParentLinkFieldID: comparison.TargetParentIssueKey,
 			}); err != nil {
@@ -2831,6 +2991,7 @@ func applyPostMigrationParentLinkCorrections(cfg Config, client *jiraClient, sta
 			continue
 		}
 
+		progress.Detail(fmt.Sprintf("checking %s", comparison.IssueKey))
 		targetChild, err := client.GetIssue(comparison.IssueKey, []string{comparison.TargetParentLinkFieldID})
 		if err != nil {
 			result.Status = "fetch_failed"
@@ -2851,13 +3012,14 @@ func applyPostMigrationParentLinkCorrections(cfg Config, client *jiraClient, sta
 		result.CurrentParentIssueID = currentParentID
 		result.CurrentParentIssueKey = currentParentKey
 
-		if currentParentID == comparison.TargetParentIssueID || (currentParentID == "" && currentParentKey != "" && currentParentKey == comparison.TargetParentIssueKey) {
+		if parentReferenceMatches(currentParentID, currentParentKey, comparison.TargetParentIssueID, comparison.TargetParentIssueKey) {
 			result.Status = "already_rewritten"
 			result.Message = "The target child issue already points to the mapped target parent issue"
 			results = append(results, result)
 			continue
 		}
 
+		progress.Detail(fmt.Sprintf("updating %s", comparison.IssueKey))
 		if err := client.UpdateIssueFields(comparison.IssueKey, map[string]any{
 			comparison.TargetParentLinkFieldID: comparison.TargetParentIssueKey,
 		}); err != nil {
@@ -2882,8 +3044,20 @@ func applyPostMigrationParentLinkCorrections(cfg Config, client *jiraClient, sta
 		})
 	}
 
+	updated := countParentLinkResultStatus(results, "updated")
+	progress.Detail(fmt.Sprintf("%d processed, %d updated, %d skipped", len(results), updated, len(results)-updated))
 	progress.Done()
 	return actions, findings, results
+}
+
+func countParentLinkResultStatus(rows []PostMigrationParentLinkResultRow, status string) int {
+	count := 0
+	for _, row := range rows {
+		if row.Status == status {
+			count++
+		}
+	}
+	return count
 }
 
 type postMigrationFilterRewritePlan struct {
@@ -2916,6 +3090,7 @@ func applyPostMigrationFilterCorrections(cfg Config, client *jiraClient, state *
 
 	for i, plan := range plans {
 		progress.Update(i+1, len(plans))
+		progress.Detail(fmt.Sprintf("preparing filter %s", nonEmptyString(plan.TargetFilterID, plan.SourceFilterID)))
 		result := PostMigrationFilterResultRow{
 			SourceFilterID:     plan.SourceFilterID,
 			SourceFilterName:   plan.SourceFilterName,
@@ -2938,6 +3113,7 @@ func applyPostMigrationFilterCorrections(cfg Config, client *jiraClient, state *
 		if cfg.SkipPostMigrateDriftChecks {
 			filter := filterByID[plan.TargetFilterID]
 			name := nonEmptyString(filter.Name, plan.TargetFilterName)
+			progress.Detail(fmt.Sprintf("updating filter %s from prepared comparison", plan.TargetFilterID))
 			updated, err := client.UpdateFilter(plan.TargetFilterID, JiraFilterUpdatePayload{
 				Name:        name,
 				Description: filter.Description,
@@ -2969,6 +3145,7 @@ func applyPostMigrationFilterCorrections(cfg Config, client *jiraClient, state *
 			continue
 		}
 
+		progress.Detail(fmt.Sprintf("checking filter %s", plan.TargetFilterID))
 		filter, err := client.GetFilter(plan.TargetFilterID)
 		if err != nil {
 			result.Status = "fetch_failed"
@@ -2996,6 +3173,7 @@ func applyPostMigrationFilterCorrections(cfg Config, client *jiraClient, state *
 			continue
 		}
 
+		progress.Detail(fmt.Sprintf("updating filter %s", plan.TargetFilterID))
 		updated, err := client.UpdateFilter(plan.TargetFilterID, JiraFilterUpdatePayload{
 			Name:        filter.Name,
 			Description: filter.Description,
@@ -3028,8 +3206,20 @@ func applyPostMigrationFilterCorrections(cfg Config, client *jiraClient, state *
 		})
 	}
 
+	updated := countFilterResultStatus(results, "updated")
+	progress.Detail(fmt.Sprintf("%d processed, %d updated, %d skipped", len(results), updated, len(results)-updated))
 	progress.Done()
 	return actions, findings, results
+}
+
+func countFilterResultStatus(rows []PostMigrationFilterResultRow, status string) int {
+	count := 0
+	for _, row := range rows {
+		if row.Status == status {
+			count++
+		}
+	}
+	return count
 }
 
 func buildPostMigrationFilterRewritePlans(rows []PostMigrationFilterComparisonRow, filters map[string]JiraFilter) []postMigrationFilterRewritePlan {

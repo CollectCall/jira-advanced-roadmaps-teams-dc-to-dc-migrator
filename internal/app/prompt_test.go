@@ -72,6 +72,12 @@ func TestReadPostMigrateDriftCheckModeDefaultsToRecheck(t *testing.T) {
 	}
 }
 
+func TestReadEnterOnlyRejectsTypedInputBeforeEnter(t *testing.T) {
+	if err := readEnterOnly(bufio.NewReader(strings.NewReader("typed value\n\n"))); err != nil {
+		t.Fatalf("readEnterOnly returned error: %v", err)
+	}
+}
+
 func TestVerifyJiraCredentialsReturnsAuthFailure(t *testing.T) {
 	accountName := authFixtureValue("jira", "account")
 	authToken := authFixtureValue("invalid", "token")

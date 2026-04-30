@@ -25,6 +25,7 @@ type progressTracker struct {
 type progressTaskState struct {
 	id      string
 	label   string
+	detail  string
 	current int
 	total   int
 	done    bool
@@ -128,7 +129,7 @@ func (p *progressTracker) startRenderer() {
 			select {
 			case <-p.renderDone:
 				p.render(frames[i%len(frames)])
-				p.clearRender()
+				p.finishRender()
 				return
 			case <-ticker.C:
 				p.render(frames[i%len(frames)])
@@ -164,19 +165,13 @@ func (p *progressTracker) render(spinner string) {
 	p.renderLines = len(lines)
 }
 
-func (p *progressTracker) clearRender() {
+func (p *progressTracker) finishRender() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.renderLines == 0 {
 		return
 	}
-	for i := 0; i < p.renderLines; i++ {
-		fmt.Fprint(os.Stdout, "\r\x1b[2K")
-		if i < p.renderLines-1 {
-			fmt.Fprint(os.Stdout, "\x1b[1A")
-		}
-	}
-	fmt.Fprint(os.Stdout, "\r")
+	fmt.Fprint(os.Stdout, "\n")
 	p.renderLines = 0
 }
 
@@ -184,10 +179,7 @@ func (p *progressTracker) snapshotLines(spinner string) (string, []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	total := p.total
-	if total <= 0 {
-		total = maxInt(1, len(p.order))
-	}
+	total := maxInt(1, len(p.order))
 	done := p.doneCount
 	if done > total {
 		done = total
@@ -201,53 +193,61 @@ func (p *progressTracker) snapshotLines(spinner string) (string, []string) {
 	bar := strings.Repeat("#", filled) + strings.Repeat("-", width-filled)
 	overall := fmt.Sprintf("[%s] %d/%d done %s", bar, done, total, spinner)
 
-	active := make([]string, 0, 4)
+	taskLines := make([]string, 0, len(p.order))
 	for _, id := range p.order {
 		task := p.tasks[id]
-		if task == nil || task.done {
+		if task == nil {
 			continue
 		}
-		active = append(active, formatTaskLine(task, spinner))
-		if len(active) == 4 {
-			break
-		}
+		taskLines = append(taskLines, formatTaskLine(task, spinner))
 	}
 
-	if remaining := activeTaskCountLocked(p.tasks) - len(active); remaining > 0 {
-		active = append(active, fmt.Sprintf("  ... %d more active task(s)", remaining))
-	}
-
-	return overall, active
-}
-
-func activeTaskCountLocked(tasks map[string]*progressTaskState) int {
-	count := 0
-	for _, task := range tasks {
-		if task != nil && !task.done {
-			count++
-		}
-	}
-	return count
+	return overall, taskLines
 }
 
 func formatTaskLine(task *progressTaskState, spinner string) string {
 	width := 16
+	label := task.label
+	if strings.TrimSpace(task.detail) != "" {
+		label = fmt.Sprintf("%s - %s", label, task.detail)
+	}
+	status := spinner
+	if task.done {
+		status = "done"
+		if task.err != nil {
+			status = "failed"
+		}
+	}
 	if task.total > 0 {
 		filled := int(float64(task.current) / float64(task.total) * float64(width))
+		if task.done && task.err == nil {
+			filled = width
+		}
 		if filled > width {
 			filled = width
 		}
 		bar := strings.Repeat("#", filled) + strings.Repeat("-", width-filled)
 		percent := int(float64(task.current) / float64(task.total) * 100)
+		if task.done && task.err == nil {
+			percent = 100
+		}
 		if percent > 100 {
 			percent = 100
 		}
-		return fmt.Sprintf("  [%s] %d/%d %3d%% %s", bar, task.current, task.total, percent, task.label)
+		return fmt.Sprintf("  [%s] %d/%d %3d%% %s", bar, task.current, task.total, percent, label)
 	}
 	if task.current > 0 {
-		return fmt.Sprintf("  [%s] %d items %s", strings.Repeat("-", width), task.current, task.label)
+		bar := strings.Repeat("-", width)
+		if task.done && task.err == nil {
+			bar = strings.Repeat("#", width)
+		}
+		return fmt.Sprintf("  [%s] %d items %s", bar, task.current, label)
 	}
-	return fmt.Sprintf("  [%s] %s %s", strings.Repeat("-", width), spinner, task.label)
+	bar := strings.Repeat("-", width)
+	if task.done && task.err == nil {
+		bar = strings.Repeat("#", width)
+	}
+	return fmt.Sprintf("  [%s] %s %s", bar, status, label)
 }
 
 func (p *progressTracker) updateTask(id string, current, total int) {
@@ -262,6 +262,19 @@ func (p *progressTracker) updateTask(id string, current, total int) {
 	}
 	task.current = current
 	task.total = total
+}
+
+func (p *progressTracker) updateTaskDetail(id string, detail string) {
+	if !p.active {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	task := p.tasks[id]
+	if task == nil || task.done {
+		return
+	}
+	task.detail = detail
 }
 
 func (p *progressTracker) finishTask(id string, err error) {
@@ -284,6 +297,13 @@ func (t *progressTask) Update(current, total int) {
 		return
 	}
 	t.tracker.updateTask(t.id, current, total)
+}
+
+func (t *progressTask) Detail(detail string) {
+	if t == nil || t.tracker == nil {
+		return
+	}
+	t.tracker.updateTaskDetail(t.id, detail)
 }
 
 func (t *progressTask) Done() {

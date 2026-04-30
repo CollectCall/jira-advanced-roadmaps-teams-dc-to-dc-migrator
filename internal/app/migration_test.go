@@ -1667,6 +1667,38 @@ func TestBuildPostMigrationFilterComparisonRowDetectsAlreadyRewrittenPortfolioCl
 	}
 }
 
+func TestBuildPostMigrationParentLinkComparisonRowDetectsAlreadyRewrittenKeyReference(t *testing.T) {
+	row, finding := buildPostMigrationParentLinkComparisonRow(nil, ParentLinkRow{
+		IssueKey:             "TP-4",
+		ProjectKey:           "TP",
+		ParentLinkFieldID:    "customfield_16600",
+		SourceParentIssueID:  "TP-5",
+		SourceParentIssueKey: "TP-5",
+	}, "customfield_16600", JiraIssue{
+		ID:  "137422",
+		Key: "TP-4",
+		Fields: map[string]any{
+			"customfield_16600": "TP-5",
+		},
+	}, JiraIssue{
+		ID:  "135912",
+		Key: "TP-5",
+	}, map[string]JiraIssue{})
+
+	if finding != nil {
+		t.Fatalf("unexpected finding: %#v", finding)
+	}
+	if row.Status != "already_rewritten" {
+		t.Fatalf("expected already_rewritten row, got %q: %s", row.Status, row.Reason)
+	}
+	if row.CurrentParentIssueKey != "TP-5" {
+		t.Fatalf("expected current parent key TP-5, got %q", row.CurrentParentIssueKey)
+	}
+	if row.CurrentParentIssueID != "" {
+		t.Fatalf("expected key-only parent reference to avoid false current ID, got %q", row.CurrentParentIssueID)
+	}
+}
+
 func TestBuildPostMigrationFilterComparisonRowsRewriteNormalizedTargetClause(t *testing.T) {
 	matchRows, comparisonRows := buildPostMigrationFilterMatchAndComparisonRows(
 		[]FilterTeamClauseRow{
@@ -2288,7 +2320,7 @@ func TestLoadTargetFiltersForSourceFilterAcceptsQuotedNumericTeamJQL(t *testing.
 	filters, findings, err := loadTargetFiltersForSourceFilter(client, "16604", FilterTeamClauseRow{
 		FilterName: "Tes filter for Team",
 		Owner:      "Jane Doe",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("loadTargetFiltersForSourceFilter returned error: %v", err)
 	}

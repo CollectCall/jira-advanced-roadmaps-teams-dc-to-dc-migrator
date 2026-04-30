@@ -806,10 +806,12 @@ func promptForVerifiedAuth(wizard *wizardContext, label, baseURL string, usernam
 
 		user, err := verifyJiraCredentials(baseURL, *username, *password)
 		if err == nil {
-			wizard.noteLines([]string{
+			if err := wizard.confirmationLines([]string{
 				fmt.Sprintf("Verified %s Jira credentials.", label),
 				fmt.Sprintf("Authenticated as %s.", jiraUserIdentity(*user)),
-			})
+			}); err != nil {
+				return err
+			}
 			return nil
 		}
 		choices := []string{"retry credentials", "cancel"}
@@ -921,6 +923,11 @@ func (w *wizardContext) note(message string) {
 func (w *wizardContext) noteLines(lines []string) {
 	renderWizardSection(w.Title, "Note", lines, "", "", "", "Press Enter to continue.")
 	_, _ = w.Reader.ReadString('\n')
+}
+
+func (w *wizardContext) confirmationLines(lines []string) error {
+	renderWizardSection(w.Title, "Confirmed", lines, "Input is disabled for this confirmation. Press Enter to continue.", "", "", "Only Enter continues. Typed input is hidden and ignored. Ctrl+C cancels.")
+	return readEnterOnly(w.Reader)
 }
 
 func (w *wizardContext) success(title, message string, next []string) {
@@ -1046,6 +1053,49 @@ func readLine(reader *bufio.Reader, defaultValue string) (string, error) {
 		return defaultValue, nil
 	}
 	return value, nil
+}
+
+func readEnterOnly(reader *bufio.Reader) error {
+	if isPasswordReadableTerminal() {
+		return readHiddenEnterOnly()
+	}
+	return readEnterOnlyFromReader(reader)
+}
+
+func isPasswordReadableTerminal() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
+func readHiddenEnterOnly() error {
+	for {
+		value, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stdout)
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(string(value)) == "" {
+			return nil
+		}
+		theme := currentUITheme()
+		fmt.Fprintln(os.Stdout, theme.style("This screen is confirmation only. Press Enter without typing or pasting a value.", theme.errorColor))
+		fmt.Fprint(os.Stdout, theme.style("> ", theme.titleColor))
+	}
+}
+
+func readEnterOnlyFromReader(reader *bufio.Reader) error {
+	for {
+		value, err := reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(value) == "" {
+			return nil
+		}
+		theme := currentUITheme()
+		fmt.Fprintln(os.Stdout)
+		fmt.Fprintln(os.Stdout, theme.style("This screen is confirmation only. Press Enter without typing a value.", theme.errorColor))
+		fmt.Fprint(os.Stdout, theme.style("> ", theme.titleColor))
+	}
 }
 
 func promptFooter(defaultValue string, optional bool) string {

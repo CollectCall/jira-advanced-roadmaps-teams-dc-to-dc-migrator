@@ -262,6 +262,38 @@ func TestPrintInteractivePostMigratePreviewSummaryOnlyShowsCorrectionPlan(t *tes
 	}
 }
 
+func TestPrintInteractivePostMigrateApplySummaryShowsSkippedCorrections(t *testing.T) {
+	report := samplePhaseReport()
+	report.Phase = phasePostMigrate
+	report.DryRun = false
+	report.Actions = []Action{
+		{Kind: "post_migrate_issue_update", Status: "skipped", SourceID: "TP-1"},
+		{Kind: "post_migrate_issue_update", Status: "skipped", SourceID: "TP-5"},
+		{Kind: "post_migrate_parent_link_update", Status: "updated", SourceID: "TP-3"},
+		{Kind: "post_migrate_parent_link_update", Status: "updated", SourceID: "TP-4"},
+		{Kind: "post_migrate_filter_update", Status: "skipped", SourceID: "21604"},
+	}
+
+	var out bytes.Buffer
+	printInteractivePostMigrateApplySummary(&out, report, []string{"out/post-report.json"})
+	rendered := out.String()
+
+	for _, want := range []string{
+		"Post-migrate phase completed",
+		"Results",
+		"Issue updates skipped: 2",
+		"Parent Link updates updated: 2",
+		"Filter updates skipped: 1",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("post-migrate apply summary did not contain %q:\n%s", want, rendered)
+		}
+	}
+	if strings.Contains(rendered, "Applied\n") {
+		t.Fatalf("post-migrate apply summary should label correction outcomes as Results:\n%s", rendered)
+	}
+}
+
 func TestPrintSummaryShowsConnectivityHintBeforeRawErrors(t *testing.T) {
 	report := Report{
 		Command: "migrate",

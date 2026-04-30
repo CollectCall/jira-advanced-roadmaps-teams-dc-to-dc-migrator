@@ -177,7 +177,7 @@ func runInteractiveMigrateSession(cfg Config) int {
 			cfg.Phase = phaseMigrate
 			cfg.PhaseExplicit = true
 		case phaseMigrate:
-			report, applied, err := runInteractiveApplyPhase(cfg, phaseMigrate)
+			report, applied, err := runInteractiveApplyPhase(cfg, phaseMigrate, nil)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 				return ExitFailure
@@ -205,19 +205,28 @@ func runInteractiveMigrateSession(cfg Config) int {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 				return ExitFailure
 			}
-			if _, err := showPreparedPostMigrationFilesFromCurrentOutputs(cfg); err != nil {
+			postMigrateStamp := interactivePhaseOutputTimestamp(phasePostMigrate)
+			cfg.OutputTimestamp = postMigrateStamp
+			preparedPostMigrateState, err := showPreparedPostMigrationFilesFromCurrentOutputs(cfg)
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 				return ExitFailure
 			}
 			cfg.Phase = phasePostMigrate
 			cfg.PhaseExplicit = true
+			report, _, err = runInteractiveApplyPhase(cfg, phasePostMigrate, &preparedPostMigrateState)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				return ExitFailure
+			}
+			return exitCodeFor(report)
 		case phasePostMigrate:
 			cfg.OutputDir, err = cleanOutputDirPath(cfg.OutputDir)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 				return ExitFailure
 			}
-			report, _, err := runInteractiveApplyPhase(cfg, phasePostMigrate)
+			report, _, err := runInteractiveApplyPhase(cfg, phasePostMigrate, nil)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 				return ExitFailure
@@ -320,7 +329,7 @@ func runInteractiveReadOnlyPhase(cfg Config, phase string) (Report, error) {
 	return report, nil
 }
 
-func runInteractiveApplyPhase(cfg Config, phase string) (Report, bool, error) {
+func runInteractiveApplyPhase(cfg Config, phase string, preparedState *migrationState) (Report, bool, error) {
 	var err error
 	cfg.OutputDir, err = cleanOutputDirPath(cfg.OutputDir)
 	if err != nil {
@@ -335,6 +344,9 @@ func runInteractiveApplyPhase(cfg Config, phase string) (Report, bool, error) {
 		cfg.PostMigrateDriftCheckSet = true
 	}
 	stamp := interactivePhaseOutputTimestamp(phase)
+	if preparedState != nil && strings.TrimSpace(cfg.OutputTimestamp) != "" {
+		stamp = cfg.OutputTimestamp
+	}
 
 	for {
 		previewCfg := cfg
@@ -349,7 +361,13 @@ func runInteractiveApplyPhase(cfg Config, phase string) (Report, bool, error) {
 		printPhaseBoundary(os.Stdout, phase, "Previewing phase", []string{
 			"Building the plan for this phase. No Jira writes will be sent.",
 		})
-		state, findings := loadMigrationState(previewCfg)
+		var state migrationState
+		var findings []Finding
+		if preparedState != nil {
+			state = *preparedState
+		} else {
+			state, findings = loadMigrationState(previewCfg)
+		}
 		_, previewFindings, previewActions := executeMigrationWithState(previewCfg, false, state, findings)
 		preview := populateExecutionReport(newReport(previewCfg), state, previewFindings, previewActions, "apply_preview", "Preview generated before apply mode confirmation")
 		previewCfg.OutputDir, err = cleanOutputDirPath(previewCfg.OutputDir)
@@ -472,6 +490,7 @@ func showPreparedPostMigrationFilesFromCurrentOutputs(cfg Config) (migrationStat
 	postCfg := cfg
 	postCfg.Phase = phasePostMigrate
 	postCfg.DryRun = true
+	postCfg.SkipPostMigrateArtifactReuse = true
 	var err error
 	postCfg.OutputDir, err = cleanOutputDirPath(postCfg.OutputDir)
 	if err != nil {
