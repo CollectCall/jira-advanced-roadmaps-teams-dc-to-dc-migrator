@@ -503,6 +503,7 @@ func showPreparedPostMigrationFilesFromCurrentOutputs(cfg Config) (migrationStat
 	if hasErrors(findings) {
 		return state, nil
 	}
+	_ = preparePostMigrationTargetArtifacts(postCfg, &state, nil)
 	return state, showPreparedPostMigrationFilesPreview(state)
 }
 

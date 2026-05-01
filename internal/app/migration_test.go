@@ -2500,6 +2500,90 @@ func TestLoadPostMigrateInputsLoadsFilterTargetMatchBeforePreparingTargets(t *te
 	}
 }
 
+func TestShowPreparedPostMigrationFilesFromCurrentOutputsPreparesFilterComparisons(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/field":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":"customfield_16604","name":"Team","custom":true,"schema":{"custom":"com.atlassian.jpo:jpo-custom-field-team"}}]`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/scriptrunner/latest/custom/findTargetTeamFiltersDB":
+			if got := r.URL.Query().Get("filterName"); got != "Numeric Team Filter" {
+				t.Fatalf("unexpected filterName query %q", got)
+			}
+			if got := r.URL.Query().Get("owner"); got != "Jane Doe" {
+				t.Fatalf("unexpected owner query %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"meta":{"lastId":0,"nextLastId":9001,"scanned":1,"matched":1,"parseErrorCount":0,"limit":500,"dbMode":"local","durationMs":1},"results":[{"id":9001,"name":"Numeric Team Filter","owner":"Jane Doe","jql":"project = ABC AND Team = 42"}],"parseErrors":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/rest/api/2/filter/9001":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"9001","name":"Numeric Team Filter","description":"demo","jql":"project = ABC AND Team = 42","owner":{"displayName":"Jane Doe"}}`))
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	writeTestFile(t, filepath.Join(dir, "team-id-mapping.migration.csv"), strings.Join([]string{
+		"Source Team ID,Source Team Name,Source Shareable,Target Team ID,Target Team Name,Migration Status,Reason,Conflict Reason",
+		"42,Red Team,true,142,Red Team,created,,",
+	}, "\n"))
+	writeTestFile(t, filepath.Join(dir, "filters-with-team-clauses.pre-migration.csv"), strings.Join([]string{
+		"Filter ID,Filter Name,Owner,Match Type,Clause Value,Source Team ID,Source Team Name,Matched Clause,JQL",
+		"10000,Numeric Team Filter,Jane Doe,team_id,42,42,Red Team,Team = 42,project = ABC AND Team = 42",
+	}, "\n"))
+
+	stdin, err := os.CreateTemp(t.TempDir(), "stdin")
+	if err != nil {
+		t.Fatalf("create stdin temp file: %v", err)
+	}
+	if _, err := stdin.WriteString("\n"); err != nil {
+		t.Fatalf("write stdin temp file: %v", err)
+	}
+	if _, err := stdin.Seek(0, io.SeekStart); err != nil {
+		t.Fatalf("rewind stdin temp file: %v", err)
+	}
+	originalStdin := os.Stdin
+	os.Stdin = stdin
+	defer func() {
+		os.Stdin = originalStdin
+		_ = stdin.Close()
+	}()
+
+	state, err := showPreparedPostMigrationFilesFromCurrentOutputs(Config{
+		Command:                  "migrate",
+		Phase:                    phaseMigrate,
+		TargetBaseURL:            server.URL,
+		TargetUsername:           "user",
+		TargetPassword:           "pass",
+		OutputDir:                dir,
+		OutputTimestamp:          "20260420-133500",
+		IssueTeamIDsInScope:      false,
+		IssueTeamIDsInScopeSet:   true,
+		ParentLinkInScope:        false,
+		ParentLinkInScopeSet:     true,
+		FilterTeamIDsInScope:     true,
+		FilterTeamIDsInScopeSet:  true,
+		PostMigrateDriftCheckSet: true,
+	})
+	if err != nil {
+		t.Fatalf("showPreparedPostMigrationFilesFromCurrentOutputs returned error: %v", err)
+	}
+	if len(state.FilterTeamClauseRows) != 1 {
+		t.Fatalf("expected source filter rows to load, got %#v", state.FilterTeamClauseRows)
+	}
+	if len(state.FilterTargetMatches) != 1 || state.FilterTargetMatches[0].TargetFilterID != "9001" {
+		t.Fatalf("expected prepared target filter match, got %#v", state.FilterTargetMatches)
+	}
+	if len(state.FilterComparisons) != 1 {
+		t.Fatalf("expected prepared filter comparison, got %#v", state.FilterComparisons)
+	}
+	if got := state.FilterComparisons[0]; got.TargetFilterID != "9001" || got.TargetTeamID != "142" || got.Status != "ready" {
+		t.Fatalf("unexpected prepared filter comparison: %#v", got)
+	}
+}
+
 func TestLoadTargetFiltersForSourceFilterAcceptsQuotedNumericTeamJQL(t *testing.T) {
 	jql := `project = "Test Project" AND team in ("4", 5)`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
