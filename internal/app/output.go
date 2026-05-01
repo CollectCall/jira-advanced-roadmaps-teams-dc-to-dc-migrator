@@ -118,7 +118,7 @@ func printSummary(w io.Writer, report Report, reportPaths []string) {
 		}
 	}
 
-	infoLines, warningLines, errorLines := categorizeFindings(report.Findings)
+	infoLines, warningLines, errorLines := categorizeFindings(report)
 	if len(errorLines) > 0 {
 		if hasJiraConnectivityFinding(report.Findings) {
 			fmt.Fprintln(w)
@@ -213,6 +213,9 @@ func summaryArtifacts(report Report) []string {
 	}
 	if artifacts, ok := report.Metadata["artifacts"].([]Artifact); ok {
 		for _, artifact := range artifacts {
+			if report.Inputs.FilterOnly && !isFilterOnlyArtifact(artifact.Key, artifact.Label) {
+				continue
+			}
 			if artifact.Label != "" && artifact.Path != "" {
 				lines = append(lines, fmt.Sprintf("%s: %s", artifact.Label, artifact.Path))
 			}
@@ -224,14 +227,23 @@ func summaryArtifacts(report Report) []string {
 			if !ok {
 				continue
 			}
+			key, _ := artifact["key"].(string)
 			label, _ := artifact["label"].(string)
 			path, _ := artifact["path"].(string)
+			if report.Inputs.FilterOnly && !isFilterOnlyArtifact(key, label) {
+				continue
+			}
 			if label != "" && path != "" {
 				lines = append(lines, fmt.Sprintf("%s: %s", label, path))
 			}
 		}
 	}
 	return uniqueStrings(lines)
+}
+
+func isFilterOnlyArtifact(key, label string) bool {
+	lower := strings.ToLower(strings.TrimSpace(key + " " + label))
+	return strings.Contains(lower, "filter")
 }
 
 func summarizeMigrationActions(actions []Action) []string {
@@ -277,16 +289,19 @@ func countMigrationActions(actions []Action) int {
 
 func isMigrationAction(kind string) bool {
 	switch kind {
-	case "team", "resource", "program", "plan":
+	case "team", "resource", "program", "plan", "post_migrate_issue_update", "post_migrate_parent_link_update", "post_migrate_filter_update":
 		return true
 	default:
 		return false
 	}
 }
 
-func categorizeFindings(findings []Finding) (infoLines, warningLines, errorLines []string) {
-	for _, finding := range findings {
+func categorizeFindings(report Report) (infoLines, warningLines, errorLines []string) {
+	for _, finding := range report.Findings {
 		if isArtifactFinding(finding.Code) {
+			continue
+		}
+		if report.Inputs.FilterOnly && !isFilterOnlyRelevantFinding(finding) {
 			continue
 		}
 		line := finding.Message
@@ -300,6 +315,19 @@ func categorizeFindings(findings []Finding) (infoLines, warningLines, errorLines
 		}
 	}
 	return uniqueStrings(infoLines), uniqueStrings(warningLines), uniqueStrings(errorLines)
+}
+
+func isFilterOnlyRelevantFinding(finding Finding) bool {
+	switch finding.Code {
+	case "identity_mapping_optional", "post_migrate_phase_ready":
+		return false
+	}
+	lower := strings.ToLower(finding.Code + " " + finding.Message)
+	return strings.Contains(lower, "filter") ||
+		strings.Contains(lower, "jql") ||
+		strings.Contains(lower, "team-clause") ||
+		strings.Contains(lower, "post-migrate phase preview") ||
+		strings.Contains(lower, "post-migrate corrections were applied")
 }
 
 func hasJiraConnectivityFinding(findings []Finding) bool {
@@ -370,6 +398,10 @@ func summaryPhaseLines(report Report) []string {
 	filterRows := filterTeamClauseRowsFromValue(imd["filters"])
 	teamMappings := teamMappingsFromValue(imd["teams"])
 	targetTeamIDs := targetTeamIDsBySource(teamMappings)
+
+	if report.Inputs.FilterOnly {
+		return filterOnlyPhaseLines(report, filterRows, filterMatchRowsFromValue(imd["filterMatches"]), filterComparisons)
+	}
 
 	preDetails := []string{}
 	if artifactCount := len(summaryArtifacts(report)); artifactCount > 0 {
@@ -444,10 +476,47 @@ func summaryPhaseLines(report Report) []string {
 	return lines
 }
 
+func filterOnlyPhaseLines(report Report, filterRows []FilterTeamClauseRow, filterMatches []PostMigrationFilterMatchRow, filterComparisons []PostMigrationFilterComparisonRow) []string {
+	selectedPhase := reportPhase(report)
+	scanStatus := "ready"
+	updateStatus := "up next"
+	switch selectedPhase {
+	case phasePreMigrate:
+		scanStatus = "completed"
+	case phasePostMigrate:
+		scanStatus = "loaded"
+		updateStatus = "preview"
+		if report.Command == "migrate" && !report.DryRun {
+			updateStatus = "completed"
+		}
+	}
+
+	counts := filterUpdateSummaryCounts(filterMatches, filterComparisons)
+	lines := []string{
+		fmt.Sprintf("Filter scan [%s]%s", scanStatus, formatPhaseDetails(nonEmptyDetails(
+			countLabel(len(filterRows), "source filter Team-clause match", "source filter Team-clause matches"),
+		))),
+	}
+	updateDetails := nonEmptyDetails(
+		countLabel(counts.candidates, "target candidate", "target candidates"),
+		countLabel(counts.ready, "filter ready for team ID rewrite", "filters ready for team ID rewrites"),
+		countLabel(counts.noCandidates, "filter with no target candidate", "filters with no target candidates"),
+		countLabel(counts.ambiguous, "filter with multiple target candidates", "filters with multiple target candidates"),
+	)
+	if len(updateDetails) > 0 || selectedPhase == phasePostMigrate {
+		lines = append(lines, fmt.Sprintf("Filter updates [%s]%s", updateStatus, formatPhaseDetails(updateDetails)))
+	}
+	return lines
+}
+
 func summaryPreviews(report Report) []previewSection {
 	imd := metadataIMD(report)
 	if imd == nil {
 		return nil
+	}
+
+	if report.Inputs.FilterOnly {
+		return filterOnlyPreviewSections(report, imd)
 	}
 
 	sections := []previewSection{}
@@ -459,6 +528,21 @@ func summaryPreviews(report Report) []previewSection {
 	}
 	if rows := postMigratePreviewLines(imd); len(rows) > 0 {
 		sections = append(sections, previewSection{Title: phasePreviewTitle(report, phasePostMigrate), Lines: rows})
+	}
+	return sections
+}
+
+func filterOnlyPreviewSections(report Report, imd map[string]any) []previewSection {
+	sections := []previewSection{}
+	if rows := filterPreviewRows(imd["filters"]); len(rows) > 0 {
+		sections = append(sections, previewSection{Title: "Filter Scan", Lines: rows})
+	}
+	if rows := filterOnlyPostMigratePreviewLines(imd); len(rows) > 0 {
+		title := "Filter Update Preview"
+		if report.Command == "migrate" && !report.DryRun && reportPhase(report) == phasePostMigrate {
+			title = "Filter Update Results"
+		}
+		sections = append(sections, previewSection{Title: title, Lines: rows})
 	}
 	return sections
 }
@@ -565,37 +649,7 @@ func postMigratePreviewLines(imd map[string]any) []string {
 		parentLinkReadyCount++
 	}
 
-	filterCandidateCount := 0
-	filterNoCandidateCount := 0
-	filterAmbiguousCount := 0
-	if len(filterMatches) > 0 {
-		for _, row := range filterMatches {
-			switch row.Status {
-			case "matched":
-				filterCandidateCount++
-			case "not_found":
-				filterNoCandidateCount++
-			case "ambiguous":
-				filterAmbiguousCount++
-			}
-		}
-	} else {
-		seen := map[string]bool{}
-		for _, row := range filterComparisons {
-			if seen[row.SourceFilterID] {
-				continue
-			}
-			seen[row.SourceFilterID] = true
-			switch row.Status {
-			case "ready", "already_rewritten", "same_id":
-				filterCandidateCount++
-			case "not_found":
-				filterNoCandidateCount++
-			case "ambiguous":
-				filterAmbiguousCount++
-			}
-		}
-	}
+	filterCounts := filterUpdateSummaryCounts(filterMatches, filterComparisons)
 
 	lines := []string{}
 	if issueReadyCount > 0 {
@@ -604,11 +658,11 @@ func postMigratePreviewLines(imd map[string]any) []string {
 	if parentLinkReadyCount > 0 {
 		lines = append(lines, fmt.Sprintf("Parent Link rewrites prepared: %d", parentLinkReadyCount))
 	}
-	if filterCandidateCount > 0 || filterNoCandidateCount > 0 || filterAmbiguousCount > 0 {
-		lines = append(lines, fmt.Sprintf("Filter candidates found: %d", filterCandidateCount))
-		lines = append(lines, fmt.Sprintf("Filters with no target candidate found: %d", filterNoCandidateCount))
-		if filterAmbiguousCount > 0 {
-			lines = append(lines, fmt.Sprintf("Filters with multiple target candidates: %d", filterAmbiguousCount))
+	if filterCounts.candidates > 0 || filterCounts.noCandidates > 0 || filterCounts.ambiguous > 0 {
+		lines = append(lines, fmt.Sprintf("Filter candidates found: %d", filterCounts.candidates))
+		lines = append(lines, fmt.Sprintf("Filters with no target candidate found: %d", filterCounts.noCandidates))
+		if filterCounts.ambiguous > 0 {
+			lines = append(lines, fmt.Sprintf("Filters with multiple target candidates: %d", filterCounts.ambiguous))
 		}
 	}
 
@@ -618,6 +672,85 @@ func postMigratePreviewLines(imd map[string]any) []string {
 		}
 	}
 	return lines
+}
+
+func filterOnlyPostMigratePreviewLines(imd map[string]any) []string {
+	filterMatches := filterMatchRowsFromValue(imd["filterMatches"])
+	filterComparisons := filterComparisonRowsFromValue(imd["filterComparisons"])
+	counts := filterUpdateSummaryCounts(filterMatches, filterComparisons)
+	if counts.total() == 0 {
+		return nil
+	}
+
+	lines := []string{}
+	if counts.ready > 0 {
+		lines = append(lines, fmt.Sprintf("Filter rewrites ready: %d", counts.ready))
+	}
+	lines = append(lines, fmt.Sprintf("Filter candidates found: %d", counts.candidates))
+	lines = append(lines, fmt.Sprintf("Filters with no target candidate found: %d", counts.noCandidates))
+	if counts.ambiguous > 0 {
+		lines = append(lines, fmt.Sprintf("Filters with multiple target candidates: %d", counts.ambiguous))
+	}
+	if counts.alreadyRewritten > 0 {
+		lines = append(lines, fmt.Sprintf("Filters already rewritten: %d", counts.alreadyRewritten))
+	}
+	if counts.blocked > 0 {
+		lines = append(lines, fmt.Sprintf("Filters blocked: %d", counts.blocked))
+	}
+	return lines
+}
+
+type filterSummaryCounts struct {
+	candidates       int
+	noCandidates     int
+	ambiguous        int
+	ready            int
+	alreadyRewritten int
+	blocked          int
+}
+
+func (counts filterSummaryCounts) total() int {
+	return counts.candidates + counts.noCandidates + counts.ambiguous + counts.ready + counts.alreadyRewritten + counts.blocked
+}
+
+func filterUpdateSummaryCounts(filterMatches []PostMigrationFilterMatchRow, filterComparisons []PostMigrationFilterComparisonRow) filterSummaryCounts {
+	counts := filterSummaryCounts{}
+	if len(filterMatches) > 0 {
+		for _, row := range filterMatches {
+			switch row.Status {
+			case "matched":
+				counts.candidates++
+			case "not_found":
+				counts.noCandidates++
+			case "ambiguous":
+				counts.ambiguous++
+			}
+		}
+	}
+
+	seenCandidateFallback := map[string]bool{}
+	for _, row := range filterComparisons {
+		if len(filterMatches) == 0 && !seenCandidateFallback[row.SourceFilterID] {
+			seenCandidateFallback[row.SourceFilterID] = true
+			switch row.Status {
+			case "ready", "already_rewritten", "same_id", "no_change":
+				counts.candidates++
+			case "not_found":
+				counts.noCandidates++
+			case "ambiguous":
+				counts.ambiguous++
+			}
+		}
+		switch row.Status {
+		case "ready":
+			counts.ready++
+		case "already_rewritten", "same_id", "no_change":
+			counts.alreadyRewritten++
+		case "blocked", "source_clause_not_found_in_target_jql", "unresolved_team_mapping":
+			counts.blocked++
+		}
+	}
+	return counts
 }
 
 func programPreviewRows(value any) []string {
@@ -1395,6 +1528,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --config                Path to config.yaml profile store")
 	fmt.Fprintln(w, "  --profile               Saved profile name")
 	fmt.Fprintln(w, "  --phase                 Migration phase for migrate: pre-migrate, migrate, or post-migrate")
+	fmt.Fprintln(w, "  --filter-only           Run only saved-filter Team ID correction flow")
 	fmt.Fprintln(w, "  --strict                Exit non-zero on warnings or errors")
 	fmt.Fprintln(w, "  --apply                 Execute writes for migrate")
 	fmt.Fprintln(w, "  --no-input              Disable interactive prompts")
@@ -1410,6 +1544,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_TARGET_BASE_URL")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_TARGET_USERNAME")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_TARGET_PASSWORD")
+	fmt.Fprintln(w, "  TEAMS_MIGRATOR_FILTER_ONLY")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_IDENTITY_MAPPING_FILE")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_TEAMS_FILE")
 	fmt.Fprintln(w, "  TEAMS_MIGRATOR_PERSONS_FILE")

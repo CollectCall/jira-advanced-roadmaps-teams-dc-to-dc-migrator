@@ -65,7 +65,7 @@ func executeMigrationWithState(cfg Config, apply bool, state migrationState, fin
 	}
 
 	actions := []Action{}
-	if !runsPostMigratePhase(cfg.Command, cfg.Phase) {
+	if !runsPostMigratePhase(cfg.Command, cfg.Phase) && !cfg.FilterOnly {
 		actions = planTeamActions(state)
 		resourceActions, resourceFindings := planResourceActions(state)
 		actions = append(actions, resourceActions...)
@@ -85,6 +85,19 @@ func executeMigrationWithState(cfg Config, apply bool, state migrationState, fin
 	}
 
 	if !apply {
+		return state, findings, actions
+	}
+
+	if runsMigratePhase(cfg.Command, cfg.Phase) && cfg.FilterOnly {
+		mappingFindings, mappingAction := writeMigrationTeamIDMappingArtifact(cfg, &state)
+		findings = append(findings, mappingFindings...)
+		if mappingAction != nil {
+			actions = append(actions, *mappingAction)
+		}
+		findings = append(findings, newFinding(SeverityInfo, "filter_only_migrate_writes_skipped", "Filter-only mode skipped team and membership writes; destination teams are expected to already exist"))
+		prepFindings, prepActions := preparePostMigrationCorrectionArtifacts(cfg, &state)
+		findings = append(findings, prepFindings...)
+		actions = append(actions, prepActions...)
 		return state, findings, actions
 	}
 
@@ -108,25 +121,37 @@ func executeMigrationWithState(cfg Config, apply bool, state migrationState, fin
 	actions = append(actions, execActions...)
 	findings = append(findings, execFindings...)
 	if runsMigratePhase(cfg.Command, cfg.Phase) {
-		exportPath, err := writeTeamIDMappingExport(cfg, state.TeamMappings)
-		if err != nil {
-			findings = append(findings, newFinding(SeverityWarning, "migration_team_id_mapping_export_failed", err.Error()))
-		} else if exportPath != "" {
-			artifact := Artifact{
-				Key:   "migration_team_id_mapping",
-				Label: "Migration team ID mapping",
-				Path:  exportPath,
-				Count: len(state.TeamMappings),
-			}
-			state.Artifacts = replaceArtifact(state.Artifacts, artifact)
-			actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
-			findings = append(findings, newFinding(SeverityInfo, artifact.Key+"_generated", fmt.Sprintf("Generated %s: %s", strings.ToLower(artifact.Label), artifact.Path)))
+		mappingFindings, mappingAction := writeMigrationTeamIDMappingArtifact(cfg, &state)
+		findings = append(findings, mappingFindings...)
+		if mappingAction != nil {
+			actions = append(actions, *mappingAction)
 		}
 		prepFindings, prepActions := preparePostMigrationCorrectionArtifacts(cfg, &state)
 		findings = append(findings, prepFindings...)
 		actions = append(actions, prepActions...)
 	}
 	return state, findings, actions
+}
+
+func writeMigrationTeamIDMappingArtifact(cfg Config, state *migrationState) ([]Finding, *Action) {
+	exportPath, err := writeTeamIDMappingExport(cfg, state.TeamMappings)
+	if err != nil {
+		return []Finding{newFinding(SeverityWarning, "migration_team_id_mapping_export_failed", err.Error())}, nil
+	}
+	if exportPath == "" {
+		return nil, nil
+	}
+
+	artifact := Artifact{
+		Key:   "migration_team_id_mapping",
+		Label: "Migration team ID mapping",
+		Path:  exportPath,
+		Count: len(state.TeamMappings),
+	}
+	state.Artifacts = replaceArtifact(state.Artifacts, artifact)
+	action := Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path}
+	finding := newFinding(SeverityInfo, artifact.Key+"_generated", fmt.Sprintf("Generated %s: %s", strings.ToLower(artifact.Label), artifact.Path))
+	return []Finding{finding}, &action
 }
 
 func preparePostMigrationCorrectionArtifacts(cfg Config, state *migrationState) ([]Finding, []Action) {
@@ -1244,6 +1269,9 @@ func replaceFirstLiteralFold(s, old, replacement string) (string, bool) {
 func loadMigrationState(cfg Config) (migrationState, []Finding) {
 	var findings []Finding
 	progressTotal := 13
+	if cfg.FilterOnly {
+		progressTotal = 3
+	}
 	if runsPreMigratePhase(cfg.Command, cfg.Phase) {
 		progressTotal += 2
 		if issueTeamCorrectionsInScope(cfg) {
@@ -1257,7 +1285,11 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 		}
 	}
 	if runsPostMigratePhase(cfg.Command, cfg.Phase) {
-		progressTotal += 12
+		if cfg.FilterOnly {
+			progressTotal += 4
+		} else {
+			progressTotal += 12
+		}
 	}
 	progress := newProgressTracker(progressTotal)
 	defer progress.Finish()
@@ -1321,51 +1353,59 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 		sourceTeams, loadErr = loadTeams(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.TeamsFile, progressFn)
 		return loadErr
 	})
-	runLoad("Loading source programs", "source_programs_load", SeverityWarning, func(progressFn func(current, total int)) error {
-		var loadErr error
-		sourcePrograms, loadErr = loadPrograms(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, progressFn)
-		return loadErr
-	})
-	runLoad("Loading source plans", "source_plans_load", SeverityWarning, func(progressFn func(current, total int)) error {
-		var loadErr error
-		sourcePlans, loadErr = loadPlans(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, progressFn)
-		return loadErr
-	})
-	runLoad("Loading source persons", "source_persons_load", SeverityError, func(progressFn func(current, total int)) error {
-		var loadErr error
-		sourcePersons, loadErr = loadPersons(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.PersonsFile, progressFn)
-		return loadErr
-	})
-	runLoad("Loading source resources", "source_resources_load", SeverityError, func(progressFn func(current, total int)) error {
-		var loadErr error
-		sourceResources, loadErr = loadResources(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.ResourcesFile, progressFn)
-		return loadErr
-	})
+	if !cfg.FilterOnly {
+		runLoad("Loading source programs", "source_programs_load", SeverityWarning, func(progressFn func(current, total int)) error {
+			var loadErr error
+			sourcePrograms, loadErr = loadPrograms(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, progressFn)
+			return loadErr
+		})
+		runLoad("Loading source plans", "source_plans_load", SeverityWarning, func(progressFn func(current, total int)) error {
+			var loadErr error
+			sourcePlans, loadErr = loadPlans(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, progressFn)
+			return loadErr
+		})
+	}
+	if !cfg.FilterOnly {
+		runLoad("Loading source persons", "source_persons_load", SeverityError, func(progressFn func(current, total int)) error {
+			var loadErr error
+			sourcePersons, loadErr = loadPersons(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.PersonsFile, progressFn)
+			return loadErr
+		})
+		runLoad("Loading source resources", "source_resources_load", SeverityError, func(progressFn func(current, total int)) error {
+			var loadErr error
+			sourceResources, loadErr = loadResources(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.ResourcesFile, progressFn)
+			return loadErr
+		})
+	}
 	runLoad("Loading target teams", "target_teams_load", SeverityError, func(progressFn func(current, total int)) error {
 		var loadErr error
 		targetTeams, loadErr = loadTeams(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "", progressFn)
 		return loadErr
 	})
-	runLoad("Loading target programs", "target_programs_load", SeverityWarning, func(progressFn func(current, total int)) error {
-		var loadErr error
-		targetPrograms, loadErr = loadPrograms(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, progressFn)
-		return loadErr
-	})
-	runLoad("Loading target plans", "target_plans_load", SeverityWarning, func(progressFn func(current, total int)) error {
-		var loadErr error
-		targetPlans, loadErr = loadPlans(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, progressFn)
-		return loadErr
-	})
-	runLoad("Loading target persons", "target_persons_load", SeverityError, func(progressFn func(current, total int)) error {
-		var loadErr error
-		targetPersons, loadErr = loadPersons(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "", progressFn)
-		return loadErr
-	})
-	runLoad("Loading target resources", "target_resources_load", SeverityWarning, func(progressFn func(current, total int)) error {
-		var loadErr error
-		targetResources, loadErr = loadResources(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "", progressFn)
-		return loadErr
-	})
+	if !cfg.FilterOnly {
+		runLoad("Loading target programs", "target_programs_load", SeverityWarning, func(progressFn func(current, total int)) error {
+			var loadErr error
+			targetPrograms, loadErr = loadPrograms(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, progressFn)
+			return loadErr
+		})
+		runLoad("Loading target plans", "target_plans_load", SeverityWarning, func(progressFn func(current, total int)) error {
+			var loadErr error
+			targetPlans, loadErr = loadPlans(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, progressFn)
+			return loadErr
+		})
+	}
+	if !cfg.FilterOnly {
+		runLoad("Loading target persons", "target_persons_load", SeverityError, func(progressFn func(current, total int)) error {
+			var loadErr error
+			targetPersons, loadErr = loadPersons(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "", progressFn)
+			return loadErr
+		})
+		runLoad("Loading target resources", "target_resources_load", SeverityWarning, func(progressFn func(current, total int)) error {
+			var loadErr error
+			targetResources, loadErr = loadResources(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "", progressFn)
+			return loadErr
+		})
+	}
 
 	wg.Wait()
 	close(results)
@@ -1400,21 +1440,25 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 		return migrationState{}, findings
 	}
 
-	progress.Start("Hydrating resource-linked persons")
-	if strings.TrimSpace(cfg.SourceBaseURL) != "" {
-		if sourceClient, err := newJiraClient(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword); err == nil {
-			sourcePersons, findings = hydrateResourceLinkedPersons(sourceClient, sourcePersons, sourceResources, "source", findings)
+	if !cfg.FilterOnly {
+		progress.Start("Hydrating resource-linked persons")
+		if strings.TrimSpace(cfg.SourceBaseURL) != "" {
+			if sourceClient, err := newJiraClient(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword); err == nil {
+				sourcePersons, findings = hydrateResourceLinkedPersons(sourceClient, sourcePersons, sourceResources, "source", findings)
+			}
 		}
+		progress.End()
 	}
-	progress.End()
 
-	progress.Start("Resolving target Jira users")
-	if strings.TrimSpace(cfg.TargetBaseURL) != "" {
-		if targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword); err == nil {
-			mapping, targetPersons, findings = resolveTargetUsersForResourcePersons(targetClient, mapping, sourcePersons, sourceResources, targetPersons, findings)
+	if !cfg.FilterOnly {
+		progress.Start("Resolving target Jira users")
+		if strings.TrimSpace(cfg.TargetBaseURL) != "" {
+			if targetClient, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword); err == nil {
+				mapping, targetPersons, findings = resolveTargetUsersForResourcePersons(targetClient, mapping, sourcePersons, sourceResources, targetPersons, findings)
+			}
 		}
+		progress.End()
 	}
-	progress.End()
 
 	state := migrationState{
 		IdentityMappings: mapping,
@@ -1440,15 +1484,21 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 	teamMappings, teamFindings := buildTeamMappings(cfg, sourceTeams, targetTeams, sourcePlans, state.PlanMappings)
 	state.TeamMappings = teamMappings
 	findings = append(findings, teamFindings...)
-	resourcePlans, resourceFindings := buildResourcePlans(state)
-	state.ResourcePlans = resourcePlans
-	findings = append(findings, resourceFindings...)
+	if !cfg.FilterOnly {
+		resourcePlans, resourceFindings := buildResourcePlans(state)
+		state.ResourcePlans = resourcePlans
+		findings = append(findings, resourceFindings...)
+	}
 	progress.End()
 
 	if runsPostMigratePhase(cfg.Command, cfg.Phase) {
 		findings = append(findings, validatePostMigratePhaseState(state)...)
 		if hasErrors(findings) {
 			return state, findings
+		}
+		if cfg.FilterOnly {
+			mappingFindings, _ := writeMigrationTeamIDMappingArtifact(cfg, &state)
+			findings = append(findings, mappingFindings...)
 		}
 	}
 
@@ -1585,6 +1635,9 @@ func sourceIssueClient(cfg Config) (*jiraClient, error) {
 
 func postMigrateCanUsePreparedArtifacts(cfg Config) bool {
 	if !runsPostMigratePhase(cfg.Command, cfg.Phase) {
+		return false
+	}
+	if cfg.FilterOnly {
 		return false
 	}
 	if _, ok := latestPostMigrateTeamMappingPath(cfg.OutputDir); !ok {
@@ -1785,23 +1838,25 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 		}
 	}
 
-	if parentPath, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-parent-link.pre-migration.csv"); ok {
-		progressStart(progress, "Loading pre-migration Parent Link export")
-		rows, err := loadParentLinkRowsFromExport(parentPath)
-		if err != nil {
-			findings = append(findings, newFinding(SeverityWarning, "post_migrate_parent_link_export_reuse_failed", fmt.Sprintf("Could not reuse existing parent-link export %s: %v", parentPath, err)))
-		} else {
-			rows = parentLinkRowsInProjectScope(rows, cfg.IssueProjectScope)
-			state.ParentLinkRows = rows
-			state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
-				Key:   "source_issues_with_parent_link",
-				Label: "Issues with Parent Link",
-				Path:  parentPath,
-				Count: len(rows),
-			})
-			findings = append(findings, newFinding(SeverityInfo, "post_migrate_parent_link_export_reused", fmt.Sprintf("Reused existing parent-link export: %s", parentPath)))
+	if cfg.ParentLinkInScope {
+		if parentPath, ok := latestOutputFamilyPath(cfg.OutputDir, "issues-with-parent-link.pre-migration.csv"); ok {
+			progressStart(progress, "Loading pre-migration Parent Link export")
+			rows, err := loadParentLinkRowsFromExport(parentPath)
+			if err != nil {
+				findings = append(findings, newFinding(SeverityWarning, "post_migrate_parent_link_export_reuse_failed", fmt.Sprintf("Could not reuse existing parent-link export %s: %v", parentPath, err)))
+			} else {
+				rows = parentLinkRowsInProjectScope(rows, cfg.IssueProjectScope)
+				state.ParentLinkRows = rows
+				state.Artifacts = replaceArtifact(state.Artifacts, Artifact{
+					Key:   "source_issues_with_parent_link",
+					Label: "Issues with Parent Link",
+					Path:  parentPath,
+					Count: len(rows),
+				})
+				findings = append(findings, newFinding(SeverityInfo, "post_migrate_parent_link_export_reused", fmt.Sprintf("Reused existing parent-link export: %s", parentPath)))
+			}
+			progressEnd(progress)
 		}
-		progressEnd(progress)
 	}
 
 	if len(state.ParentLinkRows) == 0 && cfg.ParentLinkInScope && sourceClient != nil {
@@ -1853,7 +1908,26 @@ func loadPostMigrateInputs(cfg Config, state migrationState, sourceClient *jiraC
 		}
 
 		if len(state.FilterTeamClauseRows) == 0 {
-			findings = append(findings, newFinding(SeverityError, "post_migrate_filter_input_missing", "Post-migrate phase needs the pre-migrate source filter export. Run pre-migrate first so the source list of filters with team IDs is resolved and exported."))
+			if cfg.FilterOnly && (sourceClient != nil || normalizeFilterDataSource(cfg.FilterDataSource) == filterDataSourceDatabaseCSV) {
+				progressStartCount(progress, "Rebuilding source filter Team-clause export")
+				rows, exportPath, artifact, filterFindings, err := scanFiltersWithConfiguredSource(cfg, sourceClient, state.SourceTeams, func(current, total int) {
+					progressUpdateCount(progress, current, total)
+				})
+				state.FilterTeamClauseRows = rows
+				findings = append(findings, filterFindings...)
+				if err != nil {
+					findings = append(findings, newFinding(SeverityError, "post_migrate_filter_rebuild_failed", err.Error()))
+				} else if artifact != nil {
+					state.FilterScanExportPath = exportPath
+					state.Artifacts = replaceArtifact(state.Artifacts, *artifact)
+					findings = append(findings, newFinding(SeverityInfo, artifact.Key+"_generated", fmt.Sprintf("Generated %s: %s", strings.ToLower(artifact.Label), artifact.Path)))
+				}
+				progressEnd(progress)
+			}
+		}
+
+		if len(state.FilterTeamClauseRows) == 0 {
+			findings = append(findings, newFinding(SeverityError, "post_migrate_filter_input_missing", "Post-migrate phase needs the source filter export. Run pre-migrate first, or rerun with --filter-only and a configured ScriptRunner or DB CSV filter inventory source so the tool can rebuild it."))
 		}
 	}
 
@@ -2035,7 +2109,7 @@ func buildTeamMappings(cfg Config, sourceTeams, targetTeams []TeamDTO, sourcePla
 			}
 		}
 
-		if sameIDTitleMismatch {
+		if sameIDTitleMismatch && !cfg.FilterOnly {
 			findings = append(findings, newFinding(SeverityWarning, "team_id_title_mismatch", fmt.Sprintf(
 				"Source team %q (%d) has the same ID as destination team %q but a different title. Mitigation: %s",
 				source.Title,
@@ -4701,6 +4775,9 @@ func replaceArtifact(artifacts []Artifact, replacement Artifact) []Artifact {
 }
 
 func writeCSVExport(cfg Config, name string, header []string, rows [][]string) (string, error) {
+	if err := ensureOutputDir(cfg.OutputDir); err != nil {
+		return "", err
+	}
 	path := outputPathForName(cfg, name)
 	file, err := os.Create(path)
 	if err != nil {

@@ -30,6 +30,7 @@ const (
 	envIssueProjectScope = "TEAMS_MIGRATOR_ISSUE_PROJECT_SCOPE"
 	envStrict            = "TEAMS_MIGRATOR_STRICT"
 	envDryRun            = "TEAMS_MIGRATOR_DRY_RUN"
+	envFilterOnly        = "TEAMS_MIGRATOR_FILTER_ONLY"
 	envReportInput       = "TEAMS_MIGRATOR_REPORT_INPUT"
 	envPhase             = "TEAMS_MIGRATOR_PHASE"
 )
@@ -72,6 +73,7 @@ type Config struct {
 	Strict                      bool
 	DryRun                      bool
 	Apply                       bool
+	FilterOnly                  bool
 	NoInput                     bool
 	ConfigPath                  string
 	Profile                     string
@@ -126,9 +128,12 @@ func parseConfig(args []string) (Config, error) {
 
 	cfg.Strict = boolEnv(envStrict, false)
 	cfg.DryRun = boolEnv(envDryRun, true)
+	cfg.FilterOnly = boolEnv(envFilterOnly, false)
 	fs.BoolVar(&cfg.Strict, "strict", cfg.Strict, "Exit non-zero when warnings or errors are present")
 	fs.BoolVar(&cfg.DryRun, "dry-run", cfg.DryRun, "Preview planned changes without sending writes")
 	fs.BoolVar(&cfg.Apply, "apply", false, "Execute writes for migrate")
+	fs.BoolVar(&cfg.FilterOnly, "filter-only", cfg.FilterOnly, "Run only the saved-filter Team ID rewrite flow")
+	fs.BoolVar(&cfg.FilterOnly, "filters-only", cfg.FilterOnly, "Alias for --filter-only")
 	fs.BoolVar(&cfg.NoInput, "no-input", false, "Disable interactive prompts and require flags or environment variables")
 	cfg.PhaseExplicit = envIsSet(envPhase) || stringFlagProvided(remaining, "--phase")
 
@@ -198,6 +203,7 @@ func parseConfig(args []string) (Config, error) {
 		cfg.FilterDataSource = strings.ToLower(strings.TrimSpace(cfg.FilterDataSource))
 	}
 	applyDefaultReferenceExportScopes(&cfg)
+	applyFilterOnlyMode(&cfg)
 
 	if cfg.Command != "init" && cfg.Command != "config show" && cfg.Command != "version" && cfg.Command != "self-update" && cfg.Command != "uninstall" && !cfg.NoInput {
 		if cfg.Command == "migrate" && isInteractiveTerminal() {
@@ -233,6 +239,23 @@ func applyDefaultReferenceExportScopes(cfg *Config) {
 	}
 	cfg.FilterTeamIDsInScope = filterReferenceExportsAvailable(*cfg)
 	cfg.FilterTeamIDsInScopeSet = true
+}
+
+func applyFilterOnlyMode(cfg *Config) {
+	if cfg.Command != "migrate" || !cfg.FilterOnly {
+		return
+	}
+
+	cfg.IssueTeamIDsInScope = false
+	cfg.IssueTeamIDsInScopeSet = true
+	cfg.ParentLinkInScope = false
+	cfg.ParentLinkInScopeSet = true
+	cfg.FilterTeamIDsInScope = true
+	cfg.FilterTeamIDsInScopeSet = true
+
+	if normalizeFilterDataSource(cfg.FilterDataSource) == "" && strings.TrimSpace(cfg.FilterSourceCSV) != "" {
+		cfg.FilterDataSource = filterDataSourceDatabaseCSV
+	}
 }
 
 func filterReferenceExportsAvailable(cfg Config) bool {
@@ -329,10 +352,10 @@ func (c Config) requireCoreInputs() []Finding {
 	if c.SourceBaseURL == "" && c.TeamsFile == "" {
 		findings = append(findings, newFinding(SeverityWarning, "missing_source_teams_input", "Neither source API base URL nor teams export file was provided"))
 	}
-	if c.SourceBaseURL == "" && c.PersonsFile == "" {
+	if !c.FilterOnly && c.SourceBaseURL == "" && c.PersonsFile == "" {
 		findings = append(findings, newFinding(SeverityWarning, "missing_source_persons_input", "Neither source API base URL nor persons export file was provided"))
 	}
-	if c.SourceBaseURL == "" && c.ResourcesFile == "" {
+	if !c.FilterOnly && c.SourceBaseURL == "" && c.ResourcesFile == "" {
 		findings = append(findings, newFinding(SeverityWarning, "missing_source_resources_input", "Neither source API base URL nor resources export file was provided"))
 	}
 	if c.TargetBaseURL == "" {

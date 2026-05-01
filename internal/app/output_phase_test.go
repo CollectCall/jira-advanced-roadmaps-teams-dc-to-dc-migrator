@@ -69,6 +69,56 @@ func TestPrintSummaryShowsPhaseSectionsForDecodedJSONMetadata(t *testing.T) {
 	}
 }
 
+func TestPrintSummaryFilterOnlyShowsOnlyFilterSections(t *testing.T) {
+	report := samplePhaseReport()
+	report.Phase = phasePostMigrate
+	report.Inputs.FilterOnly = true
+	report.Metadata["artifacts"] = []Artifact{
+		{Key: "team_mapping", Label: "Team mapping comparison", Path: "out/team-mapping.pre-migration.csv"},
+		{Key: "post_migrate_filter_comparison", Label: "Post-migration filter JQL comparison", Path: "out/filter-jql-comparison.post-migration.csv"},
+	}
+	report.Findings = []Finding{
+		{Severity: SeverityInfo, Code: "identity_mapping_optional", Message: "No identity mapping CSV supplied; the tool will try to auto-resolve users by matching source and target emails"},
+		{Severity: SeverityInfo, Code: "post_migrate_phase_ready", Message: "Post-migrate phase is ready because all source teams already resolve to destination team IDs"},
+		{Severity: SeverityInfo, Code: "post_migrate_target_filter_lookup_summary", Message: `Target filter lookup scanned 1 rows and found 1 exact candidate filters for "Numeric Team Filter"`},
+	}
+
+	var out bytes.Buffer
+	printSummary(&out, report, nil)
+	rendered := out.String()
+
+	for _, want := range []string{
+		"Filter scan [loaded]",
+		"Filter updates [preview]",
+		"Post-migration filter JQL comparison",
+		"Filter Scan",
+		"Filter Update Preview",
+		"Filter rewrites ready: 1",
+		"Filter candidates found: 1",
+		`Target filter lookup scanned 1 rows and found 1 exact candidate filters for "Numeric Team Filter"`,
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("filter-only summary did not contain %q:\n%s", want, rendered)
+		}
+	}
+
+	for _, unwanted := range []string{
+		"Pre-migrate Preview",
+		"Migrate Preview",
+		"Post-migrate Preview",
+		"Issue rewrites prepared",
+		"Parent Link rewrites prepared",
+		"Team mapping comparison",
+		"create destination teams",
+		"No identity mapping CSV supplied",
+		"Post-migrate phase is ready because all source teams",
+	} {
+		if strings.Contains(rendered, unwanted) {
+			t.Fatalf("filter-only summary should not contain %q:\n%s", unwanted, rendered)
+		}
+	}
+}
+
 func TestPrintSummaryShowsConnectivityHintBeforeRawErrors(t *testing.T) {
 	report := Report{
 		Command: "migrate",
@@ -95,6 +145,27 @@ func TestPrintSummaryShowsConnectivityHintBeforeRawErrors(t *testing.T) {
 	}
 	if strings.Index(rendered, hint) > strings.LastIndex(rendered, "Errors") {
 		t.Fatalf("connectivity hint should appear before raw errors:\n%s", rendered)
+	}
+}
+
+func TestCountMigrationActionsIncludesPostMigrateCorrections(t *testing.T) {
+	actions := []Action{
+		{Kind: "post_migrate_issue_update", Status: "updated", Details: "ABC-1"},
+		{Kind: "post_migrate_parent_link_update", Status: "updated", Details: "ABC-2"},
+		{Kind: "post_migrate_filter_update", Status: "updated", Details: "10000"},
+		{Kind: "post_migrate_filter_update_results", Status: "generated", Details: "out/results.csv"},
+	}
+
+	if got := countMigrationActions(actions); got != 3 {
+		t.Fatalf("countMigrationActions() = %d, want 3", got)
+	}
+
+	lines := strings.Join(summarizeMigrationActions(actions), "\n")
+	if strings.Contains(lines, "results") {
+		t.Fatalf("summary should not count generated result artifacts:\n%s", lines)
+	}
+	if !strings.Contains(lines, "Post migrate filter update updated: 1") {
+		t.Fatalf("summary did not include filter update action:\n%s", lines)
 	}
 }
 

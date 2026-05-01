@@ -110,7 +110,7 @@ func completeConfigInteractively(cfg *Config) error {
 				return err
 			}
 		}
-		if cfg.PersonsFile == "" {
+		if !cfg.FilterOnly && cfg.PersonsFile == "" {
 			cfg.PersonsFile, err = wizard.value(wizardField{
 				Label:        "Source persons JSON",
 				Description:  "This artifact contains the exported source persons dataset.",
@@ -122,7 +122,7 @@ func completeConfigInteractively(cfg *Config) error {
 				return err
 			}
 		}
-		if cfg.ResourcesFile == "" {
+		if !cfg.FilterOnly && cfg.ResourcesFile == "" {
 			cfg.ResourcesFile, err = wizard.value(wizardField{
 				Label:        "Source resources JSON",
 				Description:  "This artifact contains the exported source team membership dataset.",
@@ -406,6 +406,12 @@ func needsInteractiveSetup(cfg Config) bool {
 	case "":
 		return true
 	case "file":
+		if cfg.FilterOnly {
+			if cfg.TeamsFile == "" {
+				return true
+			}
+			break
+		}
 		if cfg.TeamsFile == "" || cfg.PersonsFile == "" || cfg.ResourcesFile == "" {
 			return true
 		}
@@ -1327,21 +1333,33 @@ const (
 	applyPreviewApply applyPreviewChoice = "apply now"
 )
 
-func promptApplyAfterPreview() (applyPreviewChoice, error) {
+func promptApplyAfterPreview(cfg Config) (applyPreviewChoice, error) {
 	if !isInteractiveTerminal() {
 		return applyPreviewApply, nil
 	}
 	reader := bufio.NewReader(os.Stdin)
-	renderWizardSection("Teams Migrator | Apply", "Choose next step", []string{
+	lines := []string{
 		"You are viewing the preview before any Jira writes are sent.",
-		"Stopping here keeps this run in dry-run mode. Applying creates records on the target Jira instance where the plan marked them as add or created.",
-		"Non-shared teams cannot be created by this tool and must already exist in the destination plan before migration.",
+	}
+	switch {
+	case runsPostMigratePhase(cfg.Command, cfg.Phase) && cfg.FilterOnly:
+		lines = append(lines, "Stopping here keeps this run in dry-run mode. Applying updates saved filter JQL where the preview marked filter corrections as ready.")
+	case runsPostMigratePhase(cfg.Command, cfg.Phase):
+		lines = append(lines, "Stopping here keeps this run in dry-run mode. Applying updates Jira issue fields, Parent Link values, and saved filter JQL where the preview marked corrections as ready.")
+	default:
+		lines = append(lines,
+			"Stopping here keeps this run in dry-run mode. Applying creates records on the target Jira instance where the plan marked them as add or created.",
+			"Non-shared teams cannot be created by this tool and must already exist in the destination plan before migration.",
+		)
+	}
+	lines = append(lines,
 		"",
 		"Choices:",
 		"1. stop",
 		"2. preview again",
 		"3. apply now",
-	}, "Type the number of your choice and press Enter.", "", "", "Press Enter to stop. Ctrl+C cancels.")
+	)
+	renderWizardSection("Teams Migrator | Apply", "Choose next step", lines, "Type the number of your choice and press Enter.", "", "", "Press Enter to stop. Ctrl+C cancels.")
 	value, err := readLine(reader, string(applyPreviewStop))
 	if err != nil {
 		return applyPreviewStop, err

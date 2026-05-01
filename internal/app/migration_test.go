@@ -131,6 +131,38 @@ func TestParseConfigAcceptsExplicitMigrationPhase(t *testing.T) {
 	}
 }
 
+func TestParseConfigFilterOnlyForcesFilterCorrectionScope(t *testing.T) {
+	filterCSV := filepath.Join(t.TempDir(), "source-filters.csv")
+	writeTestFile(t, filterCSV, "Filter ID,Filter Name,Owner,JQL\n")
+	cfg, err := parseConfig([]string{
+		"migrate",
+		"--no-input",
+		"--config", filepath.Join(t.TempDir(), "config.yaml"),
+		"--filter-only",
+		"--filter-source-csv", filterCSV,
+		"--source-base-url", "https://source.example.com/jira",
+		"--target-base-url", "https://target.example.com/jira",
+	})
+	if err != nil {
+		t.Fatalf("parseConfig returned error: %v", err)
+	}
+	if !cfg.FilterOnly {
+		t.Fatal("expected filter-only mode")
+	}
+	if cfg.IssueTeamIDsInScope || !cfg.IssueTeamIDsInScopeSet {
+		t.Fatalf("expected issue/team corrections disabled, got %#v", cfg)
+	}
+	if cfg.ParentLinkInScope || !cfg.ParentLinkInScopeSet {
+		t.Fatalf("expected Parent Link corrections disabled, got %#v", cfg)
+	}
+	if !cfg.FilterTeamIDsInScope || !cfg.FilterTeamIDsInScopeSet {
+		t.Fatalf("expected filter corrections enabled, got %#v", cfg)
+	}
+	if cfg.FilterDataSource != filterDataSourceDatabaseCSV {
+		t.Fatalf("expected filter source CSV to imply %q, got %q", filterDataSourceDatabaseCSV, cfg.FilterDataSource)
+	}
+}
+
 func TestSourceNeedsAuthWhenPasswordMissing(t *testing.T) {
 	if !sourceNeedsAuth(Config{
 		SourceBaseURL:  "https://source.example.com/jira",
@@ -1554,6 +1586,54 @@ func TestBuildPostMigrationFilterComparisonRowsRewriteNormalizedTargetClause(t *
 	}
 }
 
+func TestBuildPostMigrationFilterComparisonRowsMatchesNestedTeamClauseWithDifferentFieldCase(t *testing.T) {
+	sourceJQL := `issueFunction in subtasksOf("issueFunction in issuesInEpics(\"Team in (4)\")")`
+	targetJQL := `issueFunction in subtasksOf("issueFunction in issuesInEpics(\"team in (4)\")")`
+
+	matchRows, comparisonRows := buildPostMigrationFilterMatchAndComparisonRows(
+		[]FilterTeamClauseRow{
+			{
+				FilterID:     "10000",
+				FilterName:   "Nested Team Filter",
+				Owner:        "Jane Doe",
+				MatchType:    "team_id",
+				Clause:       "Team in (4)",
+				SourceTeamID: "4",
+				JQL:          sourceJQL,
+			},
+		},
+		map[string][]JiraFilter{
+			"10000": {
+				{ID: "20000", Name: "Nested Team Filter", Owner: &JiraFilterUser{DisplayName: "Jane Doe"}},
+			},
+		},
+		map[string]JiraFilter{
+			"20000": {
+				ID:    "20000",
+				Name:  "Nested Team Filter",
+				Owner: &JiraFilterUser{DisplayName: "Jane Doe"},
+				JQL:   targetJQL,
+			},
+		},
+		[]TeamMapping{{SourceTeamID: 4, SourceTitle: "Source Team", TargetTeamID: "8", TargetTitle: "Target Team", Decision: "merge"}},
+	)
+
+	if len(matchRows) != 1 || matchRows[0].Status != "matched" {
+		t.Fatalf("expected matched target filter, got %#v", matchRows)
+	}
+	if len(comparisonRows) != 1 {
+		t.Fatalf("expected 1 comparison row, got %d", len(comparisonRows))
+	}
+	row := comparisonRows[0]
+	if row.Status != "ready" {
+		t.Fatalf("expected ready comparison row, got %q: %s", row.Status, row.Reason)
+	}
+	want := `issueFunction in subtasksOf("issueFunction in issuesInEpics(\"team in (8)\")")`
+	if row.RewrittenTargetJQL != want {
+		t.Fatalf("unexpected rewritten target JQL:\nwant: %s\ngot:  %s", want, row.RewrittenTargetJQL)
+	}
+}
+
 func TestWriteFilterTeamClauseExportWritesCSV(t *testing.T) {
 	cfg := Config{OutputDir: t.TempDir(), OutputTimestamp: "20260417-194500"}
 	rows := []FilterTeamClauseRow{{
@@ -1886,6 +1966,173 @@ func TestExecuteMigrationWithStateWritesTeamIDMappingArtifactAfterApply(t *testi
 	}
 	if !foundArtifactAction {
 		t.Fatalf("expected migration team ID mapping generated action, got %#v", actions)
+	}
+}
+
+func TestExecuteMigrationWithStateFilterOnlyMigrateSkipsTeamAndResourceWrites(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("filter-only migrate should not call target Jira, got %s %s", r.Method, r.URL.Path)
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	cfg := Config{
+		Command:         "migrate",
+		Phase:           phaseMigrate,
+		FilterOnly:      true,
+		TargetBaseURL:   server.URL,
+		TargetUsername:  "user",
+		TargetPassword:  "pass",
+		OutputDir:       t.TempDir(),
+		OutputTimestamp: "20260420-111700",
+	}
+	state := migrationState{
+		TeamMappings: []TeamMapping{{
+			SourceTeamID:    42,
+			SourceTitle:     "Red Team",
+			SourceShareable: true,
+			TargetTeamID:    "1234",
+			TargetTitle:     "Red Team",
+			Decision:        "merge",
+		}},
+		ResourcePlans: []ResourcePlan{{
+			SourceResourceID: 99,
+			SourceTeamID:     42,
+			TargetTeamID:     "1234",
+			TargetUserID:     "target-user",
+			Status:           "planned",
+		}},
+	}
+
+	state, findings, actions := executeMigrationWithState(cfg, true, state, nil)
+	for _, finding := range findings {
+		if finding.Severity == SeverityError {
+			t.Fatalf("unexpected error finding: %#v", findings)
+		}
+	}
+	for _, action := range actions {
+		if action.Kind == "team" || action.Kind == "resource" {
+			t.Fatalf("did not expect team/resource action in filter-only mode, got %#v", actions)
+		}
+	}
+
+	path := artifactPathByKey(state.Artifacts, "migration_team_id_mapping")
+	if filepath.Base(path) != "team-id-mapping.migration.20260420-111700.csv" {
+		t.Fatalf("unexpected team ID mapping artifact path %q", path)
+	}
+	records := readCSVRecords(t, path)
+	want := [][]string{
+		{"Source Team ID", "Source Team Name", "Source Shareable", "Target Team ID", "Target Team Name", "Migration Status", "Reason", "Conflict Reason"},
+		{"42", "Red Team", "true", "1234", "Red Team", "merge", "", ""},
+	}
+	if !reflect.DeepEqual(records, want) {
+		t.Fatalf("unexpected team ID mapping artifact:\nwant: %#v\ngot:  %#v", want, records)
+	}
+}
+
+func TestLoadPostMigrateInputsFilterOnlyRebuildsFilterExportFromCSV(t *testing.T) {
+	outputDir := t.TempDir()
+	sourceCSV := filepath.Join(outputDir, "source-filters.csv")
+	writeTestFile(t, sourceCSV, strings.Join([]string{
+		"Filter ID,Filter Name,Owner,JQL",
+		`10000,Numeric Team Filter,Jane Doe,project = ABC AND Team = 42`,
+	}, "\n"))
+
+	cfg := Config{
+		Command:                 "migrate",
+		Phase:                   phasePostMigrate,
+		FilterOnly:              true,
+		OutputDir:               outputDir,
+		OutputTimestamp:         "20260420-111800",
+		FilterTeamIDsInScope:    true,
+		FilterTeamIDsInScopeSet: true,
+		FilterDataSource:        filterDataSourceDatabaseCSV,
+		FilterSourceCSV:         sourceCSV,
+	}
+	state := migrationState{
+		SourceTeams: []TeamDTO{{ID: 42, Title: "Red Team", Shareable: true}},
+		TeamMappings: []TeamMapping{{
+			SourceTeamID:    42,
+			SourceTitle:     "Red Team",
+			SourceShareable: true,
+			TargetTeamID:    "1234",
+			TargetTitle:     "Red Team",
+			Decision:        "merge",
+		}},
+	}
+
+	state, findings := loadPostMigrateInputs(cfg, state, nil, nil)
+	for _, finding := range findings {
+		if finding.Code == "post_migrate_filter_input_missing" {
+			t.Fatalf("did not expect missing filter input after CSV rebuild, got %#v", findings)
+		}
+	}
+	if len(state.FilterTeamClauseRows) != 1 {
+		t.Fatalf("expected one rebuilt filter clause row, got %#v", state.FilterTeamClauseRows)
+	}
+	path := artifactPathByKey(state.Artifacts, "source_filters_with_team_clauses")
+	if filepath.Base(path) != "filters-with-team-clauses.pre-migration.20260420-111800.csv" {
+		t.Fatalf("unexpected rebuilt filter artifact path %q", path)
+	}
+}
+
+func TestPostMigratePreparedArtifactsDisabledForFilterOnly(t *testing.T) {
+	outputDir := t.TempDir()
+	writeTestFile(t, filepath.Join(outputDir, "team-id-mapping.migration.20260420-111900.csv"), "Source Team ID,Source Team Name,Target Team ID,Target Team Name,Migration Status\n42,Red Team,1234,Red Team,merge\n")
+	writeTestFile(t, filepath.Join(outputDir, "filters-with-team-clauses.pre-migration.20260420-111900.csv"), "Filter ID,Filter Name,Owner,Match Type,Clause Value,Source Team ID,Source Team Name,Clause,JQL\n10000,Numeric Team Filter,Jane Doe,team_id,42,42,Red Team,Team = 42,project = ABC AND Team = 42\n")
+
+	cfg := Config{
+		Command:                 "migrate",
+		Phase:                   phasePostMigrate,
+		OutputDir:               outputDir,
+		IssueTeamIDsInScope:     false,
+		IssueTeamIDsInScopeSet:  true,
+		ParentLinkInScope:       false,
+		ParentLinkInScopeSet:    true,
+		FilterTeamIDsInScope:    true,
+		FilterTeamIDsInScopeSet: true,
+	}
+	if !postMigrateCanUsePreparedArtifacts(cfg) {
+		t.Fatal("expected normal post-migrate to use prepared filter artifacts")
+	}
+
+	cfg.FilterOnly = true
+	if postMigrateCanUsePreparedArtifacts(cfg) {
+		t.Fatal("expected filter-only post-migrate to rebuild live team mappings instead of reusing prepared artifacts")
+	}
+}
+
+func TestLoadPostMigrateInputsSkipsParentLinkExportWhenOutOfScope(t *testing.T) {
+	outputDir := t.TempDir()
+	writeTestFile(t, filepath.Join(outputDir, "issues-with-parent-link.pre-migration.20260420-112000.csv"), strings.Join([]string{
+		"Issue Key,Issue ID,Project Key,Project Name,Project Type,Summary,Parent Link Field ID,Source Parent Issue ID,Source Parent Issue Key,Source Parent Summary,Source Parent Project Key",
+		"ABC-123,10001,ABC,Example,business,In scope,customfield_16605,5001,INIT-1,Parent,INIT",
+	}, "\n"))
+
+	cfg := Config{
+		Command:                 "migrate",
+		Phase:                   phasePostMigrate,
+		FilterOnly:              true,
+		OutputDir:               outputDir,
+		IssueTeamIDsInScope:     false,
+		IssueTeamIDsInScopeSet:  true,
+		ParentLinkInScope:       false,
+		ParentLinkInScopeSet:    true,
+		FilterTeamIDsInScope:    false,
+		FilterTeamIDsInScopeSet: true,
+	}
+	state, findings := loadPostMigrateInputs(cfg, migrationState{}, nil, nil)
+
+	if len(state.ParentLinkRows) != 0 {
+		t.Fatalf("expected parent-link rows to stay empty when out of scope, got %#v", state.ParentLinkRows)
+	}
+	if path := artifactPathByKey(state.Artifacts, "source_issues_with_parent_link"); path != "" {
+		t.Fatalf("expected parent-link artifact to stay out of filter-only state, got %q", path)
+	}
+	for _, finding := range findings {
+		if finding.Code == "post_migrate_parent_link_export_reused" {
+			t.Fatalf("did not expect parent-link reuse finding when out of scope, got %#v", findings)
+		}
 	}
 }
 

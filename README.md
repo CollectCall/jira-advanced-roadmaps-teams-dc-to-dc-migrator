@@ -178,6 +178,19 @@ teams-migrator migrate \
   --no-input
 ```
 
+### Recover saved filters only
+
+Use `--filter-only` when destination teams already exist and issue or Parent Link corrections are already done, but saved filters still need Team ID rewrites. The run still resolves source-to-target team IDs from the live environments when no mapping artifact exists in the output folder, but it skips issue/team exports, Parent Link exports, team creation, and membership creation.
+
+```bash
+teams-migrator migrate \
+  --profile default \
+  --filter-only \
+  --phase post-migrate \
+  --apply \
+  --no-input
+```
+
 ## Filter rewrite prerequisites
 
 If filter rewrites are in scope, the tool needs a source list of filters that contain team IDs.
@@ -228,6 +241,7 @@ Sample SQL exports are provided under `scripts/sql/`:
 Useful options:
 
 - `--filter-source-csv <path>`: use a DB-derived filter CSV instead of ScriptRunner
+- `--filter-only`: run only the saved-filter Team ID correction flow
 - `--phase pre-migrate|migrate|post-migrate`: run a single phase
 - `--no-input`: disable interactive prompts
 

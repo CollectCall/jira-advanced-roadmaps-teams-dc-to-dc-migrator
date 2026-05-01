@@ -64,7 +64,7 @@ func Run(args []string) int {
 			preview := populateExecutionReport(newReport(cfg), state, previewFindings, previewActions, "apply_preview", "Preview generated before apply mode confirmation")
 			preview.DryRun = true
 			printSummary(os.Stdout, preview, nil)
-			choice, err := promptApplyAfterPreview()
+			choice, err := promptApplyAfterPreview(cfg)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 				return ExitFailure
@@ -161,7 +161,11 @@ func runInteractiveMigrateSession(cfg Config) int {
 				return exitCodeFor(report)
 			}
 			printPreMigrateReviewChecklist(os.Stdout, report)
-			proceed, err := promptContinueToMigrationPhase(phaseMigrate)
+			nextPhase := phaseMigrate
+			if cfg.FilterOnly {
+				nextPhase = phasePostMigrate
+			}
+			proceed, err := promptContinueToMigrationPhase(nextPhase)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 				return ExitFailure
@@ -169,7 +173,7 @@ func runInteractiveMigrateSession(cfg Config) int {
 			if !proceed {
 				return exitCodeFor(report)
 			}
-			cfg.Phase = phaseMigrate
+			cfg.Phase = nextPhase
 			cfg.PhaseExplicit = true
 		case phaseMigrate:
 			report, applied, err := runInteractiveApplyPhase(cfg, phaseMigrate)
@@ -213,6 +217,7 @@ func refreshInteractiveMigrateReferenceExportScopes(cfg *Config) {
 		return
 	}
 	applyDefaultReferenceExportScopes(cfg)
+	applyFilterOnlyMode(cfg)
 }
 
 func ensureInteractiveMigrateProfileSelected(cfg *Config) error {
@@ -300,7 +305,7 @@ func runInteractiveApplyPhase(cfg Config, phase string) (Report, bool, error) {
 			return preview, false, nil
 		}
 
-		choice, err := promptApplyAfterPreview()
+		choice, err := promptApplyAfterPreview(previewCfg)
 		if err != nil {
 			return Report{}, false, err
 		}
@@ -366,6 +371,14 @@ func printPreMigrateReviewChecklist(w io.Writer, report Report) {
 	artifacts := summaryArtifacts(report)
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, theme.style("Review Checklist", theme.titleColor))
+	if report.Inputs.FilterOnly {
+		fmt.Fprintln(w, "- Review the filter Team-clause export before continuing to post-migrate.")
+		if path := firstArtifactPathContaining(artifacts, "filter"); path != "" {
+			fmt.Fprintf(w, "- Filter export: %s\n", path)
+		}
+		fmt.Fprintln(w, "- Resume later with: teams-migrator migrate --filter-only --phase post-migrate")
+		return
+	}
 	fmt.Fprintln(w, "- Review team-mapping comparison first for create/reuse/skip decisions.")
 	fmt.Fprintln(w, "- Review team-membership mapping next for user resolution and skipped memberships.")
 	if path := firstArtifactPathContaining(artifacts, "team mapping"); path != "" {
