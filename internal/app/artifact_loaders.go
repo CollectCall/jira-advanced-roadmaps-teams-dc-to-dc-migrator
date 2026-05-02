@@ -457,16 +457,24 @@ func loadResourcePlansFromExport(path string) ([]ResourcePlan, error) {
 		if targetTeamName == "" {
 			targetTeamName = csvValue(record, header, "destinationteamname")
 		}
+		targetEmail := csvValue(record, header, "destinationemail")
+		if targetEmail == "" {
+			targetEmail = csvValue(record, header, "targetemail")
+		}
+		targetUserID := csvValue(record, header, "destinationuserid")
+		if targetUserID == "" {
+			targetUserID = csvValue(record, header, "targetuserid")
+		}
 		rows = append(rows, ResourcePlan{
 			SourceResourceID: sourceResourceID,
 			SourceTeamID:     sourceTeamID,
 			SourceTeamName:   csvValue(record, header, "sourceteamname"),
 			SourcePersonID:   sourcePersonID,
 			SourceEmail:      csvValue(record, header, "sourceemail"),
-			TargetEmail:      csvValue(record, header, "destinationemail"),
+			TargetEmail:      targetEmail,
 			TargetTeamID:     targetTeamID,
 			TargetTeamName:   targetTeamName,
-			TargetUserID:     csvValue(record, header, "destinationuserid"),
+			TargetUserID:     targetUserID,
 			WeeklyHours:      parseCSVFloatPtr(csvValue(record, header, "weeklyhours")),
 			Status:           status,
 			Reason:           csvValue(record, header, "reason"),

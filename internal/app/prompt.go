@@ -249,21 +249,34 @@ func completeMigrateSessionInteractively(cfg *Config) error {
 		"This tool walks through the migration in phases without re-asking saved answers.",
 		"Pre-migrate is read-only and writes review artifacts. Migrate previews and then creates safe destination teams and memberships after confirmation. Post-migrate is a later correction phase for Jira issue, Parent Link, and filter references after destination team IDs exist.",
 	}
+	if cfg.MembershipOnly {
+		introLines = []string{
+			"This membership-only run prepares and applies Advanced Roadmaps team membership corrections.",
+			"Pre-migrate is read-only and writes membership review artifacts. Migrate previews and then creates missing destination memberships after confirmation.",
+		}
+	}
 	if cfg.ProfileLoaded {
 		introLines = append(introLines, fmt.Sprintf("Loaded defaults from saved profile %q.", cfg.Profile))
 	}
 	wizard.intro(introLines)
 
 	if !cfg.PhaseExplicit {
+		artifactInfo := strings.Join([]string{
+			"pre-migrate: fetch source/target data and generate comparison artifacts only.",
+			"migrate: preview and then create destination teams.",
+		}, " ")
+		if cfg.MembershipOnly {
+			artifactInfo = strings.Join([]string{
+				"pre-migrate: fetch source/target membership data and generate comparison artifacts only.",
+				"migrate: preview and then create missing destination memberships.",
+			}, " ")
+		}
 		value, err := wizard.choice(wizardField{
-			Label:       "Start or continue at",
-			Description: "Choose where this run should start. The same in-memory credentials and answers will be reused if you continue to the next phase.",
-			InputHelp:   "Type the number of your choice and press Enter.",
-			ArtifactInfo: strings.Join([]string{
-				"pre-migrate: fetch source/target data and generate comparison artifacts only.",
-				"migrate: preview and then create destination teams.",
-			}, " "),
-			Default: defaultMigrationPhase(cfg.Command),
+			Label:        "Start or continue at",
+			Description:  "Choose where this run should start. The same in-memory credentials and answers will be reused if you continue to the next phase.",
+			InputHelp:    "Type the number of your choice and press Enter.",
+			ArtifactInfo: artifactInfo,
+			Default:      defaultMigrationPhase(cfg.Command),
 		}, availableMigrationPhases(*cfg))
 		if err != nil {
 			return err
@@ -1593,7 +1606,7 @@ const (
 	applyPreviewApply applyPreviewChoice = "apply now"
 )
 
-func promptApplyAfterPreview(phase string) (applyPreviewChoice, error) {
+func promptApplyAfterPreview(phase string, membershipOnly bool) (applyPreviewChoice, error) {
 	if !isInteractiveTerminal() {
 		return applyPreviewApply, nil
 	}
@@ -1605,10 +1618,14 @@ func promptApplyAfterPreview(phase string) (applyPreviewChoice, error) {
 	case phasePostMigrate:
 		body = append(body, "Applying updates Jira issue fields, Parent Link values, and filter JQL where the preview marked corrections as ready.")
 	case phaseMigrate:
-		body = append(body,
-			"Applying creates destination teams and memberships where the plan marked them as add or created.",
-			"Non-shared teams cannot be created by this tool and must already exist in the destination plan before migration.",
-		)
+		if membershipOnly {
+			body = append(body, "Applying creates missing destination team memberships where the plan marked them as ready.")
+		} else {
+			body = append(body,
+				"Applying creates destination teams and memberships where the plan marked them as add or created.",
+				"Non-shared teams cannot be created by this tool and must already exist in the destination plan before migration.",
+			)
+		}
 	default:
 		body = append(body, "Applying executes the write operations shown in the preview.")
 	}

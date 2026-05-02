@@ -49,7 +49,7 @@ func runsPostMigratePhase(command, phase string) bool {
 
 func availableMigrationPhases(cfg Config) []string {
 	choices := []string{phasePreMigrate, phaseMigrate}
-	if strings.TrimSpace(cfg.TargetBaseURL) != "" {
+	if !cfg.MembershipOnly && strings.TrimSpace(cfg.TargetBaseURL) != "" {
 		choices = append(choices, phasePostMigrate)
 	}
 	return choices

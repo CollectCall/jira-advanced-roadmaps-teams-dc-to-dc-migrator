@@ -57,6 +57,7 @@ type InputFiles struct {
 	FilterTeamIDsInScope bool   `json:"filterTeamIDsInScope,omitempty"`
 	ParentLinkInScope    bool   `json:"parentLinkInScope,omitempty"`
 	FilterDataSource     string `json:"filterDataSource,omitempty"`
+	MembershipOnly       bool   `json:"membershipOnly,omitempty"`
 }
 
 type Action struct {

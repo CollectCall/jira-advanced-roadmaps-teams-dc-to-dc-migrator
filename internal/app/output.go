@@ -165,12 +165,16 @@ func printInteractivePreMigrateSummary(w io.Writer, report Report, reportPaths [
 		fmt.Fprintf(w, "- Review artifacts: %d\n", len(artifacts))
 	}
 	if imd := metadataIMD(report); imd != nil {
-		for _, line := range preMigratePreviewLines(imd) {
+		lines := preMigratePreviewLines(imd)
+		if report.Inputs.MembershipOnly {
+			lines = membershipOnlyPreMigratePreviewLines(imd)
+		}
+		for _, line := range lines {
 			fmt.Fprintf(w, "- %s\n", line)
 		}
 	}
 
-	if imd := metadataIMD(report); imd != nil {
+	if imd := metadataIMD(report); imd != nil && !report.Inputs.MembershipOnly {
 		if lines := migratePreviewLines(imd); len(lines) > 0 {
 			fmt.Fprintln(w)
 			fmt.Fprintln(w, theme.style("Migrate Readiness", theme.titleColor))
@@ -190,14 +194,22 @@ func printInteractivePreMigrateSummary(w io.Writer, report Report, reportPaths [
 
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, theme.style("Next Steps", theme.titleColor))
-	fmt.Fprintln(w, "- Review team mapping decisions before applying the migrate phase.")
-	if path := firstArtifactPathContaining(artifacts, "team mapping comparison"); path != "" {
-		fmt.Fprintf(w, "- Team mapping: %s\n", artifactPathFromSummaryLine(path))
+	if report.Inputs.MembershipOnly {
+		fmt.Fprintln(w, "- Review membership mapping decisions before applying membership correction.")
+	} else {
+		fmt.Fprintln(w, "- Review team mapping decisions before applying the migrate phase.")
+		if path := firstArtifactPathContaining(artifacts, "team mapping comparison"); path != "" {
+			fmt.Fprintf(w, "- Team mapping: %s\n", artifactPathFromSummaryLine(path))
+		}
 	}
 	if path := firstArtifactPathContaining(artifacts, "team membership mapping comparison"); path != "" {
 		fmt.Fprintf(w, "- Membership mapping: %s\n", artifactPathFromSummaryLine(path))
 	}
-	fmt.Fprintln(w, "- Resume later with: teams-migrator migrate --phase migrate")
+	if report.Inputs.MembershipOnly {
+		fmt.Fprintln(w, "- Resume later with: teams-migrator migrate --membership-only --phase migrate")
+	} else {
+		fmt.Fprintln(w, "- Resume later with: teams-migrator migrate --phase migrate")
+	}
 }
 
 func printInteractivePhasePreviewSummary(w io.Writer, report Report, reportPaths []string) {
@@ -227,7 +239,7 @@ func printInteractiveMigratePreviewSummary(w io.Writer, report Report, reportPat
 	fmt.Fprintf(w, "%s\n", theme.style("Migrate preview ready", theme.titleColor))
 	printSummaryReportPaths(w, reportPaths)
 
-	if imd := metadataIMD(report); imd != nil {
+	if imd := metadataIMD(report); imd != nil && !report.Inputs.MembershipOnly {
 		fmt.Fprintln(w)
 		fmt.Fprintln(w, theme.style("Plan", theme.titleColor))
 		for _, line := range migratePreviewLines(imd) {
@@ -264,7 +276,7 @@ func printInteractiveMigrateApplySummary(w io.Writer, report Report, reportPaths
 		fmt.Fprintln(w, "- No destination teams or memberships were created.")
 	}
 
-	if imd := metadataIMD(report); imd != nil {
+	if imd := metadataIMD(report); imd != nil && !report.Inputs.MembershipOnly {
 		if lines := postMigratePreviewLines(imd); len(lines) > 0 {
 			fmt.Fprintln(w)
 			fmt.Fprintln(w, theme.style("Prepared For Post-migrate", theme.titleColor))
@@ -347,8 +359,10 @@ func printMappingFileNextSteps(w io.Writer, report Report) {
 	}
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, theme.style("Review Files", theme.titleColor))
-	if path := firstArtifactPathContaining(artifacts, "team mapping"); path != "" {
-		fmt.Fprintf(w, "- Team mapping: %s\n", artifactPathFromSummaryLine(path))
+	if !report.Inputs.MembershipOnly {
+		if path := firstArtifactPathContaining(artifacts, "team mapping"); path != "" {
+			fmt.Fprintf(w, "- Team mapping: %s\n", artifactPathFromSummaryLine(path))
+		}
 	}
 	if path := firstArtifactPathContaining(artifacts, "membership"); path != "" {
 		fmt.Fprintf(w, "- Membership mapping: %s\n", artifactPathFromSummaryLine(path))
@@ -701,23 +715,33 @@ func summaryPhaseLines(report Report) []string {
 			postStatus = "completed"
 		}
 	}
+	if report.Inputs.MembershipOnly {
+		postStatus = "skipped"
+	}
 
 	issueUpdateCount := countMappedIssueUpdates(issueRows, targetTeamIDs)
 	parentLinkUpdateCount := countReadyParentLinkUpdates(parentLinkComparisons)
 	filterUpdateCount := countReadyFilterUpdates(filterComparisons)
 
+	migrateDescription := "create destination teams"
+	if report.Inputs.MembershipOnly {
+		migrateDescription = "create destination team memberships only"
+	}
+
 	lines := []string{
 		fmt.Sprintf("Pre-migrate [%s]: fetch source and destination data and generate comparison docs%s", preStatus, formatPhaseDetails(preDetails)),
-		fmt.Sprintf("Migrate [%s]: create destination teams%s", migrateStatus, formatPhaseDetails(nonEmptyDetails(
+		fmt.Sprintf("Migrate [%s]: %s%s", migrateStatus, migrateDescription, formatPhaseDetails(nonEmptyDetails(
 			countLabel(createCount, "team to create", "teams to create"),
 			countLabel(reuseCount, "existing match reused", "existing matches reused"),
 			countLabel(skipCount, "team skipped/conflicted", "teams skipped/conflicted"),
 		))),
-		fmt.Sprintf("Post-migrate [%s]: update Jira team references%s", postStatus, formatPhaseDetails(nonEmptyDetails(
+	}
+	if !report.Inputs.MembershipOnly {
+		lines = append(lines, fmt.Sprintf("Post-migrate [%s]: update Jira team references%s", postStatus, formatPhaseDetails(nonEmptyDetails(
 			countLabel(issueUpdateCount, "issue ready for team ID rewrite", "issues ready for team ID rewrites"),
 			countLabel(parentLinkUpdateCount, "issue ready for Parent Link rewrite", "issues ready for Parent Link rewrites"),
 			countLabel(filterUpdateCount, "filter ready for team ID rewrite", "filters ready for team ID rewrites"),
-		))),
+		))))
 	}
 	return lines
 }
@@ -735,8 +759,10 @@ func summaryPreviews(report Report) []previewSection {
 	if rows := migratePreviewLines(imd); len(rows) > 0 {
 		sections = append(sections, previewSection{Title: phasePreviewTitle(report, phaseMigrate), Lines: rows})
 	}
-	if rows := postMigratePreviewLines(imd); len(rows) > 0 {
-		sections = append(sections, previewSection{Title: phasePreviewTitle(report, phasePostMigrate), Lines: rows})
+	if !report.Inputs.MembershipOnly {
+		if rows := postMigratePreviewLines(imd); len(rows) > 0 {
+			sections = append(sections, previewSection{Title: phasePreviewTitle(report, phasePostMigrate), Lines: rows})
+		}
 	}
 	return sections
 }
@@ -792,6 +818,12 @@ func preMigratePreviewLines(imd map[string]any) []string {
 	lines = appendPreviewCount(lines, "Issue/team export rows", len(issueTeamRowsFromValue(imd["issues"])))
 	lines = appendPreviewCount(lines, "Parent Link export rows", len(parentLinkRowsFromValue(imd["parentLinks"])))
 	lines = appendPreviewCount(lines, "Filter team matches", len(filterTeamClauseRowsFromValue(imd["filters"])))
+	return lines
+}
+
+func membershipOnlyPreMigratePreviewLines(imd map[string]any) []string {
+	lines := []string{}
+	lines = appendPreviewCount(lines, "Memberships compared", metadataCollectionCount(imd["resources"]))
 	return lines
 }
 
@@ -1718,6 +1750,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --phase                 Migration phase for migrate: pre-migrate, migrate, or post-migrate")
 	fmt.Fprintln(w, "  --strict                Exit non-zero on warnings or errors")
 	fmt.Fprintln(w, "  --apply                 Execute writes for migrate")
+	fmt.Fprintln(w, "  --membership-only       Run only team membership planning and correction")
 	fmt.Fprintln(w, "  --skip-post-migrate-drift-checks")
 	fmt.Fprintln(w, "                          Trust prepared post-migration comparisons and skip per-row rechecks")
 	fmt.Fprintln(w, "  --no-input              Disable interactive prompts")

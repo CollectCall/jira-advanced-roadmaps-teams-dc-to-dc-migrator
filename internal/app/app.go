@@ -64,7 +64,7 @@ func Run(args []string) int {
 			preview := populateExecutionReport(newReport(cfg), state, previewFindings, previewActions, "apply_preview", "Preview generated before apply mode confirmation")
 			preview.DryRun = true
 			printSummary(os.Stdout, preview, nil)
-			choice, err := promptApplyAfterPreview(cfg.Phase)
+			choice, err := promptApplyAfterPreview(cfg.Phase, cfg.MembershipOnly)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 				return ExitFailure
@@ -77,8 +77,10 @@ func Run(args []string) int {
 			report = populateExecutionReport(newReport(cfg), state, findings, actions, "", "")
 			report.Findings = append(report.Findings, newFinding(SeverityInfo, "apply_mode_active", "Apply mode executed remote write operations where mappings were resolvable"))
 			finalizeReport(&report)
-			stateCopy := state
-			postMigrateFollowUpState = &stateCopy
+			if !cfg.MembershipOnly {
+				stateCopy := state
+				postMigrateFollowUpState = &stateCopy
+			}
 			break
 		}
 		report = runMigrate(cfg)
@@ -187,6 +189,9 @@ func runInteractiveMigrateSession(cfg Config) int {
 			if report.Stats.Errors > 0 || !applied {
 				return exitCodeFor(report)
 			}
+			if cfg.MembershipOnly {
+				return exitCodeFor(report)
+			}
 			proceed, err := promptProceedToPostMigrationCorrections()
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -278,6 +283,7 @@ func ensureInteractiveMigrateProfileSelected(cfg *Config) error {
 			return fmt.Errorf("saved profile %q was not found in %s; run teams-migrator init to create it or choose an existing profile", name, cfg.ConfigPath)
 		}
 		cfg.Profile = name
+		clearReferenceExportScopeDefaults(cfg)
 		applySavedProfile(cfg, profile)
 		cfg.ProfileLoaded = true
 		return nil
@@ -296,9 +302,19 @@ func ensureInteractiveMigrateProfileSelected(cfg *Config) error {
 
 	profile := store.Profiles[selected]
 	cfg.Profile = selected
+	clearReferenceExportScopeDefaults(cfg)
 	applySavedProfile(cfg, profile)
 	cfg.ProfileLoaded = true
 	return nil
+}
+
+func clearReferenceExportScopeDefaults(cfg *Config) {
+	if cfg == nil || cfg.Command != "migrate" {
+		return
+	}
+	cfg.IssueTeamIDsInScopeSet = false
+	cfg.ParentLinkInScopeSet = false
+	cfg.FilterTeamIDsInScopeSet = false
 }
 
 func runInteractiveReadOnlyPhase(cfg Config, phase string) (Report, error) {
@@ -386,7 +402,7 @@ func runInteractiveApplyPhase(cfg Config, phase string, preparedState *migration
 		}
 		printInteractivePhasePreviewSummary(os.Stdout, preview, previewPaths)
 
-		choice, err := promptApplyAfterPreview(cfg.Phase)
+		choice, err := promptApplyAfterPreview(cfg.Phase, cfg.MembershipOnly)
 		if err != nil {
 			return Report{}, false, err
 		}

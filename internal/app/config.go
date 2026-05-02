@@ -75,6 +75,7 @@ type Config struct {
 	Strict                             bool
 	DryRun                             bool
 	Apply                              bool
+	MembershipOnly                     bool
 	SkipPostMigrateDriftChecks         bool
 	PostMigrateDriftCheckSet           bool
 	SkipPostMigrateArtifactReuse       bool
@@ -153,6 +154,7 @@ func parseConfig(args []string) (Config, error) {
 	fs.BoolVar(&cfg.Strict, "strict", cfg.Strict, "Exit non-zero when warnings or errors are present")
 	fs.BoolVar(&cfg.DryRun, "dry-run", cfg.DryRun, "Preview planned changes without sending writes")
 	fs.BoolVar(&cfg.Apply, "apply", false, "Execute writes for migrate")
+	fs.BoolVar(&cfg.MembershipOnly, "membership-only", false, "Run only Advanced Roadmaps team membership planning and correction")
 	fs.BoolVar(&cfg.SkipPostMigrateDriftChecks, "skip-post-migrate-drift-checks", false, "Trust prepared post-migration comparison artifacts and skip per-row target rechecks before updates")
 	fs.BoolVar(&cfg.NoInput, "no-input", false, "Disable interactive prompts and require flags or environment variables")
 	cfg.PhaseExplicit = envIsSet(envPhase) || stringFlagProvided(remaining, "--phase")
@@ -281,18 +283,33 @@ func applyDefaultReferenceExportScopes(cfg *Config) {
 	if cfg.Command != "migrate" {
 		return
 	}
+	if cfg.MembershipOnly {
+		cfg.IssueTeamIDsInScope = false
+		cfg.IssueTeamIDsInScopeSet = true
+		cfg.ParentLinkInScope = false
+		cfg.ParentLinkInScopeSet = true
+		cfg.FilterTeamIDsInScope = false
+		cfg.FilterTeamIDsInScopeSet = true
+		return
+	}
 
-	cfg.IssueTeamIDsInScope = true
-	cfg.IssueTeamIDsInScopeSet = true
+	if !cfg.IssueTeamIDsInScopeSet {
+		cfg.IssueTeamIDsInScope = true
+		cfg.IssueTeamIDsInScopeSet = true
+	}
 
-	cfg.ParentLinkInScope = strings.TrimSpace(cfg.SourceBaseURL) != "" || outputFamilyExists(cfg.OutputDir, "issues-with-parent-link.pre-migration.csv")
-	cfg.ParentLinkInScopeSet = true
+	if !cfg.ParentLinkInScopeSet {
+		cfg.ParentLinkInScope = strings.TrimSpace(cfg.SourceBaseURL) != "" || outputFamilyExists(cfg.OutputDir, "issues-with-parent-link.pre-migration.csv")
+		cfg.ParentLinkInScopeSet = true
+	}
 
 	if normalizeFilterDataSource(cfg.FilterDataSource) == "" && strings.TrimSpace(cfg.FilterSourceCSV) != "" {
 		cfg.FilterDataSource = filterDataSourceDatabaseCSV
 	}
-	cfg.FilterTeamIDsInScope = filterReferenceExportsAvailable(*cfg)
-	cfg.FilterTeamIDsInScopeSet = true
+	if !cfg.FilterTeamIDsInScopeSet {
+		cfg.FilterTeamIDsInScope = filterReferenceExportsAvailable(*cfg)
+		cfg.FilterTeamIDsInScopeSet = true
+	}
 }
 
 func filterReferenceExportsAvailable(cfg Config) bool {
@@ -371,8 +388,12 @@ func (c Config) validate() error {
 		return errors.New("report command requires --input or TEAMS_MIGRATOR_REPORT_INPUT")
 	}
 	if c.Command == "migrate" {
-		if normalizeMigrationPhase(c.Phase) == "" {
+		normalizedPhase := normalizeMigrationPhase(c.Phase)
+		if normalizedPhase == "" {
 			return fmt.Errorf("unsupported migration phase %q; use pre-migrate, migrate, or post-migrate", c.Phase)
+		}
+		if c.MembershipOnly && normalizedPhase == phasePostMigrate {
+			return errors.New("membership-only mode only supports pre-migrate and migrate phases")
 		}
 	}
 	if c.PostMigrateIssueWorkers < 1 {

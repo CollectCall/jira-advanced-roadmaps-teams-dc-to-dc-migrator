@@ -70,10 +70,20 @@ func executeMigrationWithState(cfg Config, apply bool, state migrationState, fin
 	if hasErrors(findings) {
 		return state, findings, nil
 	}
+	if cfg.MembershipOnly && runsMigratePhase(cfg.Command, cfg.Phase) {
+		var membershipFindings []Finding
+		state, membershipFindings = prepareMembershipOnlyResourcePlans(cfg, state)
+		findings = append(findings, membershipFindings...)
+		if hasErrors(findings) {
+			return state, findings, nil
+		}
+	}
 
 	actions := []Action{}
 	if !runsPostMigratePhase(cfg.Command, cfg.Phase) {
-		actions = planTeamActions(state)
+		if !cfg.MembershipOnly {
+			actions = planTeamActions(state)
+		}
 		resourceActions, resourceFindings := planResourceActions(state)
 		actions = append(actions, resourceActions...)
 		findings = append(findings, resourceFindings...)
@@ -113,27 +123,37 @@ func executeMigrationWithState(cfg Config, apply bool, state migrationState, fin
 		return state, findings, actions
 	}
 
-	execActions, execFindings := applyMigration(targetClient, &state)
+	var execActions []Action
+	var execFindings []Finding
+	if cfg.MembershipOnly && runsMigratePhase(cfg.Command, cfg.Phase) {
+		execActions, execFindings = applyMembershipOnlyMigration(targetClient, &state)
+	} else {
+		execActions, execFindings = applyMigration(targetClient, &state)
+	}
 	actions = append(actions, execActions...)
 	findings = append(findings, execFindings...)
 	if runsMigratePhase(cfg.Command, cfg.Phase) {
-		exportPath, err := writeTeamIDMappingExport(cfg, state.TeamMappings)
-		if err != nil {
-			findings = append(findings, newFinding(SeverityWarning, "migration_team_id_mapping_export_failed", err.Error()))
-		} else if exportPath != "" {
-			artifact := Artifact{
-				Key:   "migration_team_id_mapping",
-				Label: "Migration team ID mapping",
-				Path:  exportPath,
-				Count: len(state.TeamMappings),
+		if !cfg.MembershipOnly {
+			exportPath, err := writeTeamIDMappingExport(cfg, state.TeamMappings)
+			if err != nil {
+				findings = append(findings, newFinding(SeverityWarning, "migration_team_id_mapping_export_failed", err.Error()))
+			} else if exportPath != "" {
+				artifact := Artifact{
+					Key:   "migration_team_id_mapping",
+					Label: "Migration team ID mapping",
+					Path:  exportPath,
+					Count: len(state.TeamMappings),
+				}
+				state.Artifacts = replaceArtifact(state.Artifacts, artifact)
+				actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
+				findings = append(findings, newFinding(SeverityInfo, artifact.Key+"_generated", fmt.Sprintf("Generated %s: %s", strings.ToLower(artifact.Label), artifact.Path)))
 			}
-			state.Artifacts = replaceArtifact(state.Artifacts, artifact)
-			actions = append(actions, Action{Kind: artifact.Key, Status: "generated", Details: artifact.Path})
-			findings = append(findings, newFinding(SeverityInfo, artifact.Key+"_generated", fmt.Sprintf("Generated %s: %s", strings.ToLower(artifact.Label), artifact.Path)))
+			prepFindings, prepActions := preparePostMigrationCorrectionArtifacts(cfg, &state)
+			findings = append(findings, prepFindings...)
+			actions = append(actions, prepActions...)
+		} else {
+			findings = append(findings, newFinding(SeverityInfo, "membership_only_apply_complete", "Membership-only migrate applied team membership corrections without creating teams or preparing post-migrate rewrites"))
 		}
-		prepFindings, prepActions := preparePostMigrationCorrectionArtifacts(cfg, &state)
-		findings = append(findings, prepFindings...)
-		actions = append(actions, prepActions...)
 	}
 	return state, findings, actions
 }
@@ -1578,6 +1598,9 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 	cfg.OutputDir = outputDir
 
 	progressTotal := 13
+	if cfg.MembershipOnly {
+		progressTotal -= 4
+	}
 	if runsPreMigratePhase(cfg.Command, cfg.Phase) {
 		progressTotal += 2
 		if issueTeamCorrectionsInScope(cfg) {
@@ -1655,16 +1678,18 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 		sourceTeams, loadErr = loadTeams(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.TeamsFile, progressFn)
 		return loadErr
 	})
-	runLoad("Loading source programs", "source_programs_load", SeverityWarning, func(progressFn func(current, total int)) error {
-		var loadErr error
-		sourcePrograms, loadErr = loadPrograms(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, progressFn)
-		return loadErr
-	})
-	runLoad("Loading source plans", "source_plans_load", SeverityWarning, func(progressFn func(current, total int)) error {
-		var loadErr error
-		sourcePlans, loadErr = loadPlans(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, progressFn)
-		return loadErr
-	})
+	if !cfg.MembershipOnly {
+		runLoad("Loading source programs", "source_programs_load", SeverityWarning, func(progressFn func(current, total int)) error {
+			var loadErr error
+			sourcePrograms, loadErr = loadPrograms(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, progressFn)
+			return loadErr
+		})
+		runLoad("Loading source plans", "source_plans_load", SeverityWarning, func(progressFn func(current, total int)) error {
+			var loadErr error
+			sourcePlans, loadErr = loadPlans(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, progressFn)
+			return loadErr
+		})
+	}
 	runLoad("Loading source persons", "source_persons_load", SeverityError, func(progressFn func(current, total int)) error {
 		var loadErr error
 		sourcePersons, loadErr = loadPersons(cfg.SourceBaseURL, cfg.SourceUsername, cfg.SourcePassword, cfg.PersonsFile, progressFn)
@@ -1680,16 +1705,18 @@ func loadMigrationState(cfg Config) (migrationState, []Finding) {
 		targetTeams, loadErr = loadTeams(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "", progressFn)
 		return loadErr
 	})
-	runLoad("Loading target programs", "target_programs_load", SeverityWarning, func(progressFn func(current, total int)) error {
-		var loadErr error
-		targetPrograms, loadErr = loadPrograms(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, progressFn)
-		return loadErr
-	})
-	runLoad("Loading target plans", "target_plans_load", SeverityWarning, func(progressFn func(current, total int)) error {
-		var loadErr error
-		targetPlans, loadErr = loadPlans(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, progressFn)
-		return loadErr
-	})
+	if !cfg.MembershipOnly {
+		runLoad("Loading target programs", "target_programs_load", SeverityWarning, func(progressFn func(current, total int)) error {
+			var loadErr error
+			targetPrograms, loadErr = loadPrograms(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, progressFn)
+			return loadErr
+		})
+		runLoad("Loading target plans", "target_plans_load", SeverityWarning, func(progressFn func(current, total int)) error {
+			var loadErr error
+			targetPlans, loadErr = loadPlans(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, progressFn)
+			return loadErr
+		})
+	}
 	runLoad("Loading target persons", "target_persons_load", SeverityError, func(progressFn func(current, total int)) error {
 		var loadErr error
 		targetPersons, loadErr = loadPersons(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword, "", progressFn)
@@ -1961,13 +1988,26 @@ func migrateCanUsePreparedArtifacts(cfg Config) bool {
 	if !runsMigratePhase(cfg.Command, cfg.Phase) {
 		return false
 	}
-	if _, ok := latestOutputFamilyPath(cfg.OutputDir, "team-mapping.pre-migration.csv"); !ok {
-		return false
+	if cfg.MembershipOnly {
+		if _, ok := latestMembershipOnlyTeamMappingPath(cfg.OutputDir); !ok {
+			return false
+		}
+	} else {
+		if _, ok := latestOutputFamilyPath(cfg.OutputDir, "team-mapping.pre-migration.csv"); !ok {
+			return false
+		}
 	}
 	if _, ok := latestOutputFamilyPath(cfg.OutputDir, "team-membership-mapping.pre-migration.csv"); !ok {
 		return false
 	}
 	return true
+}
+
+func latestMembershipOnlyTeamMappingPath(outputDir string) (string, bool) {
+	if path, ok := latestOutputFamilyPath(outputDir, "team-id-mapping.migration.csv"); ok {
+		return path, true
+	}
+	return latestOutputFamilyPath(outputDir, "team-mapping.pre-migration.csv")
 }
 
 func latestPostMigrateTeamMappingPath(outputDir string) (string, bool) {
@@ -1988,7 +2028,11 @@ func loadMigrateStateFromPreparedArtifacts(cfg Config, progress *progressTracker
 	var findings []Finding
 	state := migrationState{}
 
-	if mappingPath, ok := latestOutputFamilyPath(cfg.OutputDir, "team-mapping.pre-migration.csv"); ok {
+	mappingPath, mappingFound := latestOutputFamilyPath(cfg.OutputDir, "team-mapping.pre-migration.csv")
+	if cfg.MembershipOnly {
+		mappingPath, mappingFound = latestMembershipOnlyTeamMappingPath(cfg.OutputDir)
+	}
+	if mappingFound {
 		progressStart(progress, "Loading pre-migration team mapping")
 		cleanPath, cleanErr := cleanInputFilePath("team mapping export", mappingPath)
 		if cleanErr != nil {
@@ -2813,6 +2857,199 @@ func planResourceActions(state migrationState) ([]Action, []Finding) {
 		})
 	}
 	return actions, findings
+}
+
+func prepareMembershipOnlyResourcePlans(cfg Config, state migrationState) (migrationState, []Finding) {
+	if len(state.ResourcePlans) == 0 {
+		return state, nil
+	}
+
+	client, err := newJiraClient(cfg.TargetBaseURL, cfg.TargetUsername, cfg.TargetPassword)
+	if err != nil {
+		return state, []Finding{newFinding(SeverityError, "membership_only_target_client", err.Error())}
+	}
+
+	resolved := 0
+	failed := 0
+	cache := map[string]string{}
+	for i := range state.ResourcePlans {
+		plan := &state.ResourcePlans[i]
+		if plan.TargetEmail == "" && plan.SourceEmail != "" {
+			if targetEmail, ok := state.IdentityMappings[strings.ToLower(strings.TrimSpace(plan.SourceEmail))]; ok {
+				plan.TargetEmail = targetEmail
+			}
+		}
+		if strings.TrimSpace(plan.TargetUserID) == "" && strings.TrimSpace(plan.TargetEmail) != "" {
+			email := strings.ToLower(strings.TrimSpace(plan.TargetEmail))
+			userID, ok := cache[email]
+			if !ok {
+				var resolveErr error
+				userID, resolveErr = resolveTargetUserIDByEmail(client, email)
+				if resolveErr != nil {
+					failed++
+					continue
+				}
+				cache[email] = userID
+			}
+			plan.TargetUserID = userID
+			resolved++
+		}
+		if plan.Status == "skipped" && recoverableMembershipSkipReason(plan.Reason) && strings.TrimSpace(plan.TargetTeamID) != "" && strings.TrimSpace(plan.TargetUserID) != "" {
+			plan.Status = "planned"
+			plan.Reason = ""
+		}
+	}
+
+	findings := make([]Finding, 0, 2)
+	if resolved > 0 {
+		findings = append(findings, newFinding(SeverityInfo, "membership_only_target_users_resolved", fmt.Sprintf("Resolved %d target Jira user IDs for membership-only correction rows", resolved)))
+	}
+	if failed > 0 {
+		findings = append(findings, newFinding(SeverityWarning, "membership_only_target_user_resolution_failed", fmt.Sprintf("Could not resolve target Jira user IDs for %d membership-only correction rows", failed)))
+	}
+	return state, findings
+}
+
+func recoverableMembershipSkipReason(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "", "identity mapping missing", "source person email missing", "destination user missing":
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveTargetUserIDByEmail(client *jiraClient, email string) (string, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return "", fmt.Errorf("target email is empty")
+	}
+	users, err := client.SearchCoreUsers(email)
+	if err != nil {
+		return "", err
+	}
+	for _, user := range users {
+		if !user.Active {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(user.EmailAddress), email) {
+			userID := firstNonEmpty(user.Key, user.Name)
+			if userID == "" {
+				break
+			}
+			return userID, nil
+		}
+	}
+	return "", fmt.Errorf("target Jira user with email %s was not found", email)
+}
+
+func applyMembershipOnlyMigration(client *jiraClient, state *migrationState) ([]Action, []Finding) {
+	actions := make([]Action, 0, len(state.ResourcePlans))
+	findings := make([]Finding, 0)
+	progress := newProgressTracker(0)
+	defer progress.Finish()
+
+	teamIDs := finalTargetTeamIDsBySourceTeam(state.TeamMappings)
+	existingMemberships, existingFindings := loadExistingTargetMembershipKeys(client)
+	findings = append(findings, existingFindings...)
+
+	resourceTask := progress.BeginTask("Applying team memberships")
+	created := 0
+	for i := range state.ResourcePlans {
+		resource := &state.ResourcePlans[i]
+		resourceTask.Update(i+1, len(state.ResourcePlans))
+		resourceTask.Detail(fmt.Sprintf("resource %d", resource.SourceResourceID))
+		if resource.Status == "skipped" {
+			continue
+		}
+		targetTeamID, ok := membershipTargetTeamID(*resource, teamIDs)
+		if !ok {
+			findings = append(findings, newFinding(SeverityWarning, "membership_only_team_missing", fmt.Sprintf("Resource %d could not resolve target team", resource.SourceResourceID)))
+			continue
+		}
+		targetUserID := strings.TrimSpace(resource.TargetUserID)
+		if targetUserID == "" {
+			findings = append(findings, newFinding(SeverityWarning, "membership_only_target_user_missing", fmt.Sprintf("Resource %d could not resolve target user", resource.SourceResourceID)))
+			continue
+		}
+		key := fmt.Sprintf("%d:%s", targetTeamID, targetUserID)
+		if _, exists := existingMemberships[key]; exists {
+			actions = append(actions, Action{
+				Kind:     "resource",
+				SourceID: strconv.FormatInt(resource.SourceResourceID, 10),
+				TargetID: strconv.FormatInt(targetTeamID, 10),
+				Status:   "skipped",
+				Details:  "destination membership already exists",
+			})
+			continue
+		}
+		createdID, err := client.CreateResource(targetTeamID, targetUserID, resource.WeeklyHours)
+		if err != nil {
+			findings = append(findings, newFinding(SeverityWarning, "membership_only_resource_create_failed", fmt.Sprintf("Creating resource %d failed: %v", resource.SourceResourceID, err)))
+			continue
+		}
+		existingMemberships[key] = struct{}{}
+		created++
+		actions = append(actions, Action{
+			Kind:     "resource",
+			SourceID: strconv.FormatInt(resource.SourceResourceID, 10),
+			TargetID: strconv.FormatInt(createdID, 10),
+			Status:   "created",
+			Details:  fmt.Sprintf("team=%d user=%s", targetTeamID, targetUserID),
+		})
+	}
+	resourceTask.Detail(fmt.Sprintf("%d processed, %d created", len(state.ResourcePlans), created))
+	resourceTask.Done()
+
+	return actions, findings
+}
+
+func finalTargetTeamIDsBySourceTeam(mappings []TeamMapping) map[int64]int64 {
+	teamIDs := map[int64]int64{}
+	for _, mapping := range mappings {
+		switch strings.ToLower(strings.TrimSpace(mapping.Decision)) {
+		case "conflict", "skipped":
+			continue
+		}
+		targetID, err := strconv.ParseInt(strings.TrimSpace(mapping.TargetTeamID), 10, 64)
+		if err != nil || targetID == 0 {
+			continue
+		}
+		teamIDs[mapping.SourceTeamID] = targetID
+	}
+	return teamIDs
+}
+
+func membershipTargetTeamID(resource ResourcePlan, teamIDs map[int64]int64) (int64, bool) {
+	if targetTeamID, err := strconv.ParseInt(strings.TrimSpace(resource.TargetTeamID), 10, 64); err == nil && targetTeamID != 0 {
+		return targetTeamID, true
+	}
+	targetTeamID, ok := teamIDs[resource.SourceTeamID]
+	return targetTeamID, ok && targetTeamID != 0
+}
+
+func loadExistingTargetMembershipKeys(client *jiraClient) (map[string]struct{}, []Finding) {
+	keys := map[string]struct{}{}
+	persons, err := client.ListPersons(nil)
+	if err != nil {
+		return keys, []Finding{newFinding(SeverityWarning, "membership_only_target_persons_load_failed", fmt.Sprintf("Could not load target persons before membership-only apply: %v", err))}
+	}
+	resources, err := client.ListResources(nil)
+	if err != nil {
+		return keys, []Finding{newFinding(SeverityWarning, "membership_only_target_resources_load_failed", fmt.Sprintf("Could not load target resources before membership-only apply: %v", err))}
+	}
+	personByID := map[int64]PersonDTO{}
+	for _, person := range persons {
+		personByID[person.ID] = person
+	}
+	for _, resource := range resources {
+		_, _, userID := resourcePersonDetails(resource, personByID)
+		if userID == "" {
+			continue
+		}
+		keys[fmt.Sprintf("%d:%s", resource.TeamID, userID)] = struct{}{}
+	}
+	return keys, nil
 }
 
 func applyMigration(client *jiraClient, state *migrationState) ([]Action, []Finding) {

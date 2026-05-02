@@ -218,6 +218,80 @@ func TestPrintInteractiveMigratePreviewSummaryOnlyShowsMigratePlan(t *testing.T)
 	}
 }
 
+func TestPrintInteractiveMembershipOnlyPreMigrateSummaryOmitsTeamFlow(t *testing.T) {
+	report := samplePhaseReport()
+	report.Inputs.MembershipOnly = true
+	report.Source = Endpoint{BaseURL: "https://source.example.com", Mode: "api"}
+	report.Target = Endpoint{BaseURL: "https://target.example.com", Mode: "api"}
+	report.Metadata["artifacts"] = []Artifact{
+		{Label: "Team mapping comparison", Path: "out/team-mapping.pre-migration.csv"},
+		{Label: "Team membership mapping comparison", Path: "out/team-membership-mapping.pre-migration.csv"},
+	}
+
+	var out bytes.Buffer
+	printInteractivePreMigrateSummary(&out, report, []string{"out/report.json"})
+	rendered := out.String()
+
+	for _, want := range []string{
+		"Pre-migrate phase completed",
+		"Memberships compared: 1",
+		"Review membership mapping decisions before applying membership correction.",
+		"Membership mapping: out/team-membership-mapping.pre-migration.csv",
+		"Resume later with: teams-migrator migrate --membership-only --phase migrate",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("membership-only pre-migrate summary did not contain %q:\n%s", want, rendered)
+		}
+	}
+	for _, unwanted := range []string{
+		"Migrate Readiness",
+		"Teams compared",
+		"Team mapping: out/team-mapping.pre-migration.csv",
+		"Resume later with: teams-migrator migrate --phase migrate",
+	} {
+		if strings.Contains(rendered, unwanted) {
+			t.Fatalf("membership-only pre-migrate summary contained noisy text %q:\n%s", unwanted, rendered)
+		}
+	}
+}
+
+func TestPrintInteractiveMembershipOnlyMigratePreviewOmitsTeamPlan(t *testing.T) {
+	report := samplePhaseReport()
+	report.Inputs.MembershipOnly = true
+	report.Phase = phaseMigrate
+	report.DryRun = true
+	report.Actions = []Action{{Kind: "resource", Status: "skipped"}}
+	report.Metadata["artifacts"] = []Artifact{
+		{Label: "Team mapping comparison", Path: "out/team-mapping.pre-migration.csv"},
+		{Label: "Team membership mapping comparison", Path: "out/team-membership-mapping.pre-migration.csv"},
+	}
+
+	var out bytes.Buffer
+	printInteractivePhasePreviewSummary(&out, report, []string{"out/migrate-report.json"})
+	rendered := out.String()
+
+	for _, want := range []string{
+		"Migrate preview ready",
+		"Memberships",
+		"Memberships skipped: 1",
+		"Membership mapping: out/team-membership-mapping.pre-migration.csv",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("membership-only migrate preview did not contain %q:\n%s", want, rendered)
+		}
+	}
+	for _, unwanted := range []string{
+		"Teams to create",
+		"Existing teams to reuse",
+		"Team mapping: out/team-mapping.pre-migration.csv",
+		"Post-migrate",
+	} {
+		if strings.Contains(rendered, unwanted) {
+			t.Fatalf("membership-only migrate preview contained noisy text %q:\n%s", unwanted, rendered)
+		}
+	}
+}
+
 func TestPrintInteractivePostMigratePreviewSummaryOnlyShowsCorrectionPlan(t *testing.T) {
 	report := samplePhaseReport()
 	report.Phase = phasePostMigrate

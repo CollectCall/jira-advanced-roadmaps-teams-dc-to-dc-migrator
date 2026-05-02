@@ -123,6 +123,7 @@ func newReport(cfg Config) Report {
 			FilterTeamIDsInScope: cfg.FilterTeamIDsInScope,
 			ParentLinkInScope:    cfg.ParentLinkInScope,
 			FilterDataSource:     cfg.FilterDataSource,
+			MembershipOnly:       cfg.MembershipOnly,
 		},
 		ExitBehavior: ExitBehavior{
 			SuccessCode:     ExitSuccess,

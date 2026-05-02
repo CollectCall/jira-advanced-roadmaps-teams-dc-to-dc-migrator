@@ -489,6 +489,7 @@ func TestRefreshInteractiveMigrateReferenceExportScopesRecomputesAfterProfileLoa
 		t.Fatal("expected filter scope to start disabled before profile values are loaded")
 	}
 
+	clearReferenceExportScopeDefaults(&cfg)
 	applySavedProfile(&cfg, SavedProfile{
 		SourceBaseURL:               "https://source.example.com/jira",
 		FilterDataSource:            filterDataSourceScriptRunner,
@@ -501,6 +502,29 @@ func TestRefreshInteractiveMigrateReferenceExportScopesRecomputesAfterProfileLoa
 	}
 	if !cfg.FilterTeamIDsInScope || !cfg.FilterTeamIDsInScopeSet {
 		t.Fatalf("expected filter scope to refresh after profile load, got %#v", cfg)
+	}
+}
+
+func TestApplyDefaultReferenceExportScopesPreservesExplicitDisabledScopes(t *testing.T) {
+	cfg := Config{
+		Command:                 "migrate",
+		SourceBaseURL:           "https://source.example.com/jira",
+		FilterSourceCSV:         "source-filters.csv",
+		IssueTeamIDsInScope:     false,
+		IssueTeamIDsInScopeSet:  true,
+		ParentLinkInScope:       false,
+		ParentLinkInScopeSet:    true,
+		FilterTeamIDsInScope:    false,
+		FilterTeamIDsInScopeSet: true,
+	}
+
+	applyDefaultReferenceExportScopes(&cfg)
+
+	if cfg.IssueTeamIDsInScope || cfg.ParentLinkInScope || cfg.FilterTeamIDsInScope {
+		t.Fatalf("expected explicit disabled scopes to be preserved, got %#v", cfg)
+	}
+	if cfg.FilterDataSource != filterDataSourceDatabaseCSV {
+		t.Fatalf("expected filter source CSV to still select db-csv data source, got %q", cfg.FilterDataSource)
 	}
 }
 
@@ -692,6 +716,20 @@ func TestParseConfigRejectsFallbackWorkersAbovePrimaryWorkers(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "fallback workers cannot exceed") {
 		t.Fatalf("expected fallback worker validation error, got %v", err)
+	}
+}
+
+func TestParseConfigRejectsMembershipOnlyPostMigratePhase(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	_, err := parseConfig([]string{
+		"migrate",
+		"--no-input",
+		"--config", configPath,
+		"--membership-only",
+		"--phase", phasePostMigrate,
+	})
+	if err == nil || !strings.Contains(err.Error(), "membership-only mode only supports pre-migrate and migrate phases") {
+		t.Fatalf("expected membership-only post-migrate validation error, got %v", err)
 	}
 }
 
@@ -1017,6 +1055,58 @@ func TestBuildResourcePlansPreservesUnsetWeeklyHours(t *testing.T) {
 	}
 	if plans[0].WeeklyHours != nil {
 		t.Fatalf("expected weekly hours to remain unset, got %#v", plans[0].WeeklyHours)
+	}
+}
+
+func TestFinalTargetTeamIDsBySourceTeamIncludesCompletedMappings(t *testing.T) {
+	mappings := []TeamMapping{
+		{SourceTeamID: 10, TargetTeamID: "20", Decision: "merge"},
+		{SourceTeamID: 11, TargetTeamID: "21", Decision: "created"},
+		{SourceTeamID: 12, TargetTeamID: "22", Decision: "add"},
+		{SourceTeamID: 13, TargetTeamID: "23", Decision: "skipped"},
+		{SourceTeamID: 14, TargetTeamID: "24", Decision: "conflict"},
+	}
+
+	got := finalTargetTeamIDsBySourceTeam(mappings)
+	if got[10] != 20 || got[11] != 21 || got[12] != 22 {
+		t.Fatalf("expected resolved target team IDs for reusable mappings, got %#v", got)
+	}
+	if _, ok := got[13]; ok {
+		t.Fatalf("did not expect skipped mapping to resolve, got %#v", got)
+	}
+	if _, ok := got[14]; ok {
+		t.Fatalf("did not expect conflicted mapping to resolve, got %#v", got)
+	}
+}
+
+func TestRecoverableMembershipSkipReason(t *testing.T) {
+	for _, reason := range []string{"", "identity mapping missing", "source person email missing", "destination user missing"} {
+		if !recoverableMembershipSkipReason(reason) {
+			t.Fatalf("expected %q to be recoverable", reason)
+		}
+	}
+	if recoverableMembershipSkipReason("team mapping missing or conflicted") {
+		t.Fatal("team mapping failures must not be recovered by identity correction")
+	}
+}
+
+func TestLoadResourcePlansFromExportAcceptsTargetHeaders(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "team-membership-mapping.pre-migration.csv")
+	writeTestFile(t, path, strings.Join([]string{
+		"sourceResourceId,sourceTeamId,sourceTeamName,sourcePersonId,sourceEmail,targetEmail,targetTeamId,targetTeamName,targetUserId,weeklyHours,status,reason",
+		"500,10,Source Team,100,alice@example.com,alice.target@example.com,20,Target Team,user-1,32,planned,",
+	}, "\n"))
+
+	rows, err := loadResourcePlansFromExport(path)
+	if err != nil {
+		t.Fatalf("load resource plans: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	if rows[0].TargetEmail != "alice.target@example.com" || rows[0].TargetUserID != "user-1" {
+		t.Fatalf("expected target header values to load, got %#v", rows[0])
 	}
 }
 
