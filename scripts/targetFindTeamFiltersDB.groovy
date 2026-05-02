@@ -1,3 +1,6 @@
+// Teams Migrator ScriptRunner endpoint.
+// Script version: 2026-05-02-master.
+
 import com.onresolve.scriptrunner.runner.rest.common.CustomEndpointDelegate
 import groovy.json.JsonBuilder
 import groovy.transform.BaseScript
@@ -22,6 +25,7 @@ import org.ofbiz.core.entity.DelegatorInterface
 
 @BaseScript CustomEndpointDelegate delegate
 
+@Field static String SCRIPT_VERSION = "2026-05-02-master"
 @Field static String DB_PRODUCT = null
 
 findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String body, HttpServletRequest request ->
@@ -232,6 +236,7 @@ findTargetTeamFiltersDB(httpMethod: "GET") { MultivaluedMap queryParams, String 
 
     def response = [
         meta: [
+            scriptVersion   : SCRIPT_VERSION,
             lastId         : lastId,
             nextLastId     : lastScannedId,
             scanned        : scanned,
