@@ -1,4 +1,4 @@
-// Teams Migrator ScriptRunner endpoint.
+// Teams Migrator ScriptRunner source endpoint.
 // Script version: 2.0.
 
 import com.onresolve.scriptrunner.runner.rest.common.CustomEndpointDelegate
