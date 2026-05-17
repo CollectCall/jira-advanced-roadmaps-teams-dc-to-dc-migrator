@@ -4,6 +4,7 @@ dist/
 .gocache/
 .gomodcache/
 .gopath/
+.pi/
 .tmp-go-build-cache/
 out/
 tmp/
