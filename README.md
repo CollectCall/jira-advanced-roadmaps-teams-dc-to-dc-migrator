@@ -66,14 +66,14 @@ If you are comfortable with a remote installer script, release installers are al
 #### Linux and macOS
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/master/scripts/install-release.sh | sh
+curl -fsSL https://raw.githubusercontent.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/main/scripts/install-release.sh | sh
 teams-migrator init
 ```
 
 #### Windows
 
 ```powershell
-irm https://raw.githubusercontent.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/master/scripts/install-release.ps1 | iex
+irm https://raw.githubusercontent.com/CollectCall/jira-advanced-roadmaps-teams-dc-to-dc-migrator/main/scripts/install-release.ps1 | iex
 teams-migrator.exe init
 ```
 

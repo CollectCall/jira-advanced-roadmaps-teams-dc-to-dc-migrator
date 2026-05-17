@@ -21,8 +21,8 @@ Preferred flow for user-visible work:
 1. create a focused branch
 2. make one logical change per commit
 3. open a PR with a Conventional Commit-style title
-4. merge to `master`
-5. tag from `master`
+4. merge to `main`
+5. tag from `main`
 
 ## Artifact policy
 

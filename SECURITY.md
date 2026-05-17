@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-This project is still in an early public stage. Security fixes are handled on a best-effort basis on the latest released version and the current `master` branch.
+This project is still in an early public stage. Security fixes are handled on a best-effort basis on the latest released version and the current `main` branch.
 
 ## Reporting a vulnerability
 
